@@ -2,9 +2,9 @@
 
 Know what your automations do, why they exist, when they run, and what happened last.
 
-Vardr is a lightweight Rust CLI and background runner with an optional local browser dashboard. Agents use the CLI; humans can use either. Closing the dashboard does not stop automations. MIT licensed.
+Vardr is a lightweight Rust CLI and background runner with an optional native macOS app. Agents use the CLI; humans can use the app or local browser dashboard. Closing the app does not stop scheduled automations. MIT licensed.
 
-**First draft, v0.1.0.** macOS and Linux. No Electron runtime, Node runtime, database server, or always-open browser is needed. Agent processes run only when a task or failure investigation calls for them. Actual agent memory use depends on the chosen agent.
+**First draft, v0.2.0.** macOS app; macOS and Linux CLI. No Electron runtime, Node runtime, database server, or always-open browser is needed. Agent processes run only when a task or failure investigation calls for them. Actual agent memory use depends on the chosen agent.
 
 ![Vardr dashboard with public demo jobs](docs/dashboard.png)
 
@@ -18,7 +18,29 @@ Vardr is a lightweight Rust CLI and background runner with an optional local bro
 - Read-only launchd inventory. Discovery does not adopt, alter, or disable existing services.
 - Signed GitHub Release updates using the same standalone-helper pattern as [Ratatoskr Skill Sync](https://github.com/oana-ffg/ratatoskr-skill-sync). Automatic checks run once per local day, from midnight by default, when the scheduler has no workers active.
 
-## Try it
+## macOS app
+
+Download the Apple Silicon or Intel DMG from [GitHub Releases](https://github.com/oana-ffg/vardr/releases/latest), drag **Vardr.app** to Applications, and open it normally. The window uses the macOS system web view; it does not start a browser, Electron, or Node.
+
+- **Scheduler → Start Scheduler at Login** installs and starts the independent background runner. Opening the app alone does not enable scheduled jobs.
+- **Scheduler → Open Data Folder** opens your private definitions, logs, and settings.
+- **Scheduler → Copy CLI Command** copies the exact bundled CLI command for this installation. Agents can also call `/Applications/Vardr.app/Contents/MacOS/vardr` directly.
+- **Vardr → Check for Updates** installs signed app updates for the next launch. Automatic checks follow the same daily update setting while the app is open. The headless scheduler updates its own standalone helper independently.
+
+Closing the app releases its window and UI process. If a manually started UI job is still running, Vardr asks before interrupting it. Jobs owned by the independent scheduler continue. App and CLI use the same data directory; `VARDR_HOME` also works for an isolated app trial.
+
+The scheduler runs a stable copy of the CLI in the private data directory, so replacing or updating the app cannot remove the service executable. App updates leave existing scheduler jobs and run records alone. Update signatures are configured; Apple Developer ID signing/notarization is not yet configured.
+
+To build the macOS app from source (Rust and Node are build tools only):
+
+```sh
+cd desktop
+npx --yes @tauri-apps/cli@2.12.3 build --bundles app
+```
+
+The app is produced in `target/release/bundle/macos/Vardr.app`. Release builds create a drag-to-Applications DMG with `scripts/create-desktop-dmg.py`.
+
+## Try the CLI
 
 Build with Rust 1.90 or newer:
 
@@ -74,7 +96,7 @@ See [verification and current limits](docs/verification.md), [job definitions an
 
 ## Updates
 
-The official verification key and release endpoint are compiled into the binary. No signing-key setup is needed on users' machines. Automatic updates are enabled by default when `serve` runs. Edit the local `config.json` to change the time or disable them:
+The official verification key and release endpoint are compiled into the binary. No signing-key setup is needed on users' machines. Automatic helper updates are enabled by default when `serve` runs. The app checks separately while open and records its results in `desktop-updates.json`. Edit the local `config.json` to change the time or disable them:
 
 ```json
 {
@@ -101,4 +123,4 @@ cargo clippy --all-targets --locked -- -D warnings
 cargo test --locked
 ```
 
-CI runs on Apple Silicon macOS, Intel macOS, and Linux x64. Release signing is build-time tooling only; production requires just the native binary. The optional UI binds only to IPv4 loopback and authenticates its page with a private entry URL and protects its API with a fresh per-process token. No telemetry or hosted service.
+CLI CI runs on Apple Silicon macOS, Intel macOS, and Linux x64. Desktop CI packages and verifies the app on both Mac architectures. Release signing is build-time tooling only; production requires just the native binary. The optional UI binds only to IPv4 loopback and authenticates its page with a private entry URL and protects its API with a fresh per-process token. No telemetry or hosted service.

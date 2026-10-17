@@ -21,3 +21,26 @@ jobs:
       - run: cargo clippy --all-targets --locked -- -D warnings
       - run: cargo test --locked
       - run: cargo build --release --locked
+
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: Swatinem/rust-cache@v2
+      - run: python3 scripts/prepare-desktop.py
+      - run: cargo clippy -p vardr-desktop --all-targets --locked -- -D warnings
+      - name: Package the native app
+        working-directory: desktop
+        run: npx --yes @tauri-apps/cli@2.12.3 build --bundles app
+      - name: Verify app bundle
+        run: python3 scripts/check-desktop-bundle.py target/release/bundle/macos/Vardr.app

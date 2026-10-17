@@ -6,84 +6,127 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
-use std::{io::Read, sync::atomic::Ordering, time::Duration};
+use std::{
+    io::Read,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
-pub fn serve(store: &Store, port: u16) -> Result<()> {
-    let server = Server::http(("127.0.0.1", port)).map_err(|e| anyhow::anyhow!("{e}"))?;
-    let port = server
-        .server_addr()
-        .to_ip()
-        .context("no local address")?
-        .port();
-    let token = uuid::Uuid::new_v4().to_string();
-    println!("Vardr dashboard: http://127.0.0.1:{port}/?token={token}");
-    let mut workers = Workers::default();
-    while !STOP.load(Ordering::Relaxed) {
-        for (id, result) in workers.reap() {
-            if let Err(e) = result {
-                eprintln!("{id}: {e:#}");
+/// Bind before opening an app window, so the private URL is ready synchronously.
+pub struct Dashboard {
+    server: Server,
+    port: u16,
+    token: String,
+    activity: Arc<AtomicUsize>,
+}
+impl Dashboard {
+    pub fn bind(port: u16) -> Result<Self> {
+        let server = Server::http(("127.0.0.1", port)).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let port = server
+            .server_addr()
+            .to_ip()
+            .context("no local address")?
+            .port();
+        Ok(Self {
+            server,
+            port,
+            token: uuid::Uuid::new_v4().to_string(),
+            activity: Arc::default(),
+        })
+    }
+    pub fn entry_url(&self) -> String {
+        format!("http://127.0.0.1:{}/?token={}", self.port, self.token)
+    }
+    pub fn activity(&self) -> Arc<AtomicUsize> {
+        self.activity.clone()
+    }
+    pub fn run(self, store: &Store) -> Result<()> {
+        let Self {
+            server,
+            port,
+            token,
+            activity,
+        } = self;
+        let mut workers = Workers::default();
+        while !STOP.load(Ordering::Relaxed) {
+            for (id, result) in workers.reap() {
+                if let Err(e) = result {
+                    eprintln!("{id}: {e:#}");
+                }
             }
-        }
-        let Some(mut request) = server.recv_timeout(Duration::from_millis(250))? else {
-            continue;
-        };
-        let valid_host = header(&request, "Host")
-            .is_some_and(|h| h == format!("127.0.0.1:{port}") || h == format!("localhost:{port}"));
-        if !valid_host {
-            respond(request, 403, "text/plain", "Invalid host".into(), None);
-            continue;
-        }
-        let url = request.url().to_owned();
-        let (path, query) = url.split_once('?').unwrap_or((&url, ""));
-        if request.method() == &Method::Get && path == "/" {
-            let query_token = query.split('&').find_map(|p| p.strip_prefix("token="));
-            let cookie_ok = header(&request, "Cookie").is_some_and(|c| {
-                c.split(';')
-                    .any(|part| part.trim() == format!("vardr={token}"))
+            activity.store(workers.tasks.len(), Ordering::Relaxed);
+            let Some(mut request) = server.recv_timeout(Duration::from_millis(250))? else {
+                continue;
+            };
+            let valid_host = header(&request, "Host").is_some_and(|h| {
+                h == format!("127.0.0.1:{port}") || h == format!("localhost:{port}")
             });
-            if query_token != Some(token.as_str()) && !cookie_ok {
+            if !valid_host {
+                respond(request, 403, "text/plain", "Invalid host".into(), None);
+                continue;
+            }
+            let url = request.url().to_owned();
+            let (path, query) = url.split_once('?').unwrap_or((&url, ""));
+            if request.method() == &Method::Get && path == "/" {
+                let query_token = query.split('&').find_map(|p| p.strip_prefix("token="));
+                let cookie_ok = header(&request, "Cookie").is_some_and(|c| {
+                    c.split(';')
+                        .any(|part| part.trim() == format!("vardr={token}"))
+                });
+                if query_token != Some(token.as_str()) && !cookie_ok {
+                    respond(
+                        request,
+                        403,
+                        "text/plain",
+                        "Open the private dashboard URL printed by `vardr ui`.".into(),
+                        None,
+                    );
+                    continue;
+                }
+                let html = include_str!("ui.html").replace("__VARDR_TOKEN__", &token);
+                respond(request, 200, "text/html; charset=utf-8", html, Some(&token));
+                continue;
+            }
+            if header(&request, "X-Vardr-Token") != Some(token.as_str()) {
                 respond(
                     request,
                     403,
-                    "text/plain",
-                    "Open the private dashboard URL printed by `vardr ui`.".into(),
+                    "application/json",
+                    json!({"error":"Missing dashboard token"}).to_string(),
                     None,
                 );
                 continue;
             }
-            let html = include_str!("ui.html").replace("__VARDR_TOKEN__", &token);
-            respond(request, 200, "text/html; charset=utf-8", html, Some(&token));
-            continue;
+            let result = handle(store, &mut request, &mut workers);
+            activity.store(workers.tasks.len(), Ordering::Relaxed);
+            match result {
+                Ok(value) => respond(request, 200, "application/json", value.to_string(), None),
+                Err(e) => respond(
+                    request,
+                    400,
+                    "application/json",
+                    json!({"error":format!("{e:#}")}).to_string(),
+                    None,
+                ),
+            }
         }
-        if header(&request, "X-Vardr-Token") != Some(token.as_str()) {
-            respond(
-                request,
-                403,
-                "application/json",
-                json!({"error":"Missing dashboard token"}).to_string(),
-                None,
-            );
-            continue;
+        for (id, result) in workers.finish() {
+            if let Err(e) = result {
+                eprintln!("{id}: {e:#}");
+            }
         }
-        let result = handle(store, &mut request, &mut workers);
-        match result {
-            Ok(value) => respond(request, 200, "application/json", value.to_string(), None),
-            Err(e) => respond(
-                request,
-                400,
-                "application/json",
-                json!({"error":format!("{e:#}")}).to_string(),
-                None,
-            ),
-        }
+        activity.store(0, Ordering::Relaxed);
+        Ok(())
     }
-    for (id, result) in workers.finish() {
-        if let Err(e) = result {
-            eprintln!("{id}: {e:#}");
-        }
-    }
-    Ok(())
+}
+pub fn serve(store: &Store, port: u16) -> Result<()> {
+    let dashboard = Dashboard::bind(port)?;
+    println!("Vardr dashboard: {}", dashboard.entry_url());
+    dashboard.run(store)
 }
 fn header<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
     request
@@ -114,8 +157,14 @@ fn handle(store: &Store, request: &mut Request, workers: &mut Workers) -> Result
         } else {
             None
         };
+        let desktop_updates_path = store.root.join("desktop-updates.json");
+        let desktop_updates: Option<Value> = if desktop_updates_path.exists() {
+            Some(read_json(&desktop_updates_path)?)
+        } else {
+            None
+        };
         return Ok(
-            json!({"jobs":jobs,"errors":errors,"service_running":store.is_locked("service")?,"service":service,"version":env!("CARGO_PKG_VERSION")}),
+            json!({"desktop_updates":desktop_updates,"jobs":jobs,"errors":errors,"service_running":store.is_locked("service")?,"service":service,"version":env!("CARGO_PKG_VERSION")}),
         );
     }
     if request.method() == &Method::Get && path.starts_with("/api/logs/") {

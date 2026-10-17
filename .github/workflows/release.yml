@@ -45,6 +45,23 @@ jobs:
           npx --yes @tauri-apps/cli@2.12.3 signer sign --app-version "$version" "artifacts/vardr-${{ matrix.platform }}"
       - name: Verify published signature against compiled trust key
         run: artifacts/vardr-${{ matrix.platform }} verify artifacts/vardr-${{ matrix.platform }} artifacts/vardr-${{ matrix.platform }}.sig
+      - name: Build and sign macOS app
+        if: runner.os == 'macOS'
+        working-directory: desktop
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+        run: npx --yes @tauri-apps/cli@2.12.3 build --target ${{ matrix.target }} --bundles app --config '{"bundle":{"createUpdaterArtifacts":true}}'
+      - name: Collect and verify macOS desktop artifacts
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          python3 scripts/check-desktop-bundle.py "target/${{ matrix.target }}/release/bundle/macos/Vardr.app"
+          cp "target/${{ matrix.target }}/release/bundle/macos/Vardr.app.tar.gz" "artifacts/Vardr-${{ matrix.platform }}.app.tar.gz"
+          cp "target/${{ matrix.target }}/release/bundle/macos/Vardr.app.tar.gz.sig" "artifacts/Vardr-${{ matrix.platform }}.app.tar.gz.sig"
+          python3 scripts/create-desktop-dmg.py "target/${{ matrix.target }}/release/bundle/macos/Vardr.app" "artifacts/Vardr-${{ matrix.platform }}.dmg"
+          artifacts/vardr-${{ matrix.platform }} verify "artifacts/Vardr-${{ matrix.platform }}.app.tar.gz" "artifacts/Vardr-${{ matrix.platform }}.app.tar.gz.sig"
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.platform }}

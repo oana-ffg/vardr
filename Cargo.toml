@@ -1,6 +1,6 @@
 [package]
 name = "vardr"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
@@ -34,3 +34,8 @@ codegen-units = 1
 [[bin]]
 name = "vardr"
 path = "src/main.rs"
+
+[workspace]
+members = ["desktop/src-tauri"]
+default-members = ["."]
+resolver = "2"

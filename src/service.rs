@@ -1,7 +1,11 @@
 use crate::store::{Store, reject_symlinks};
 use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
-use std::{fs, path::PathBuf, process::Command};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 const LABEL: &str = "dev.vardr.runner";
 fn escape(s: &str) -> String {
@@ -12,7 +16,9 @@ fn escape(s: &str) -> String {
         .replace('\'', "&apos;")
 }
 pub fn plan(store: &Store) -> Result<String> {
-    let helper = std::env::current_exe()?;
+    plan_with_helper(store, &store.root.join("bin/vardr"))
+}
+fn plan_with_helper(store: &Store, helper: &Path) -> Result<String> {
     let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".into());
     let items = [
         helper.to_string_lossy().into_owned(),
@@ -42,6 +48,10 @@ fn service_path() -> Result<PathBuf> {
         .join("Library/LaunchAgents/dev.vardr.runner.plist"))
 }
 pub fn install(store: &Store) -> Result<()> {
+    install_from(store, &std::env::current_exe()?)
+}
+/// Desktop bundles supply their CLI explicitly; launchd must never run the UI executable.
+pub fn install_from(store: &Store, source: &Path) -> Result<()> {
     ensure!(
         cfg!(target_os = "macos"),
         "service installation currently supports macOS; run `vardr serve` under your OS supervisor elsewhere"
@@ -49,13 +59,17 @@ pub fn install(store: &Store) -> Result<()> {
     let _lock = store.lock("service-install")?;
     let path = service_path()?;
     reject_symlinks(&path)?;
-    let content = plan(store)?;
     if path.exists() {
         anyhow::bail!(
             "{} already exists; remove the recorded service before reinstalling",
             path.display()
         );
     }
+    let _service = store
+        .lock("service")
+        .context("stop the running scheduler before installing")?;
+    let helper = stage_helper(store, source)?;
+    let content = plan_with_helper(store, &helper)?;
     fs::create_dir_all(path.parent().unwrap())?;
     use std::io::Write;
     fs::OpenOptions::new()
@@ -68,6 +82,7 @@ pub fn install(store: &Store) -> Result<()> {
         content,
     };
     crate::store::write_json(&store.root.join("service-install.json"), &receipt)?;
+    drop(_service);
     let uid = unsafe { libc::getuid() };
     let status = Command::new("launchctl")
         .args(["bootstrap", &format!("gui/{uid}")])
@@ -115,4 +130,36 @@ pub fn remove(store: &Store) -> Result<()> {
     fs::remove_file(receipt.path)?;
     fs::remove_file(receipt_path)?;
     Ok(())
+}
+
+/// Keep the service executable outside the app so an app update cannot remove it.
+pub fn stage_helper(store: &Store, source: &Path) -> Result<PathBuf> {
+    let directory = store.root.join("bin");
+    let destination = directory.join("vardr");
+    reject_symlinks(&destination)?;
+    fs::create_dir_all(&directory)?;
+    let version = |path: &Path| -> Result<semver::Version> {
+        let output = crate::process::capture(
+            &[path.to_string_lossy().into_owned(), "--version".into()],
+            &directory,
+            1024,
+            std::time::Duration::from_secs(10),
+        )?;
+        let text = std::str::from_utf8(&output)?;
+        Ok(semver::Version::parse(
+            text.trim()
+                .strip_prefix("vardr ")
+                .context("invalid helper version")?,
+        )?)
+    };
+    let source_version = version(source)?;
+    if destination.exists() && version(&destination)? >= source_version {
+        return Ok(destination);
+    }
+    let file = tempfile::NamedTempFile::new_in(&directory)?;
+    fs::copy(source, file.path())?;
+    file.as_file().sync_all()?;
+    file.persist(&destination).map_err(|e| e.error)?;
+    fs::File::open(directory)?.sync_all()?;
+    Ok(destination)
 }

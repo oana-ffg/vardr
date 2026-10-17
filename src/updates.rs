@@ -110,6 +110,13 @@ pub fn install(release: &Release) -> Result<()> {
     ensure!(bytes.len() as u64 <= MAX_BINARY, "update binary too large");
     verify(PUBLIC_KEY, &bytes, &asset.signature)?;
     let executable = std::env::current_exe()?;
+    let bundled = executable
+        .parent()
+        .is_some_and(|p| p.ends_with("Contents/MacOS"));
+    ensure!(
+        !bundled,
+        "the bundled CLI updates with Vardr.app; use the app's Check for Updates menu or install a standalone CLI"
+    );
     let parent = executable
         .parent()
         .context("installed binary has no parent directory")?;

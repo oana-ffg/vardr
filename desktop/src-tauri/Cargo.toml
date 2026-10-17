@@ -1,0 +1,21 @@
+[package]
+name = "vardr-desktop"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+anyhow = "1"
+chrono = "0.4"
+serde_json = "1" # Required by tauri::generate_context!
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-single-instance = "2"
+tauri-plugin-updater = { version = "2.14", default-features = false, features = ["rustls-tls", "system-proxy"] }
+vardr = { path = "../.." }
+directories = "6"
