@@ -16,12 +16,19 @@ use tauri::{
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 use vardr::{process, service, store::Store, ui::Dashboard};
 
+#[derive(PartialEq)]
+enum Lifecycle {
+    Ready,
+    Installing,
+    Closing,
+}
+
 struct Desktop {
     store: Store,
     activity: Arc<AtomicUsize>,
     server: Mutex<Option<JoinHandle<()>>>,
     updating: AtomicBool,
-    installing: AtomicBool,
+    lifecycle: Mutex<Lifecycle>,
 }
 
 fn data_directory() -> Result<PathBuf> {
@@ -263,7 +270,7 @@ fn main() {
                 activity,
                 server: Mutex::new(Some(server)),
                 updating: AtomicBool::new(false),
-                installing: AtomicBool::new(false),
+                lifecycle: Mutex::new(Lifecycle::Ready),
             });
             menus(app.handle())?;
             // Local HTTP remains authenticated; the page receives no Tauri IPC capabilities.
@@ -310,7 +317,8 @@ fn main() {
     app.run(|app, event| match event {
         RunEvent::ExitRequested { api, .. } => {
             let desktop = app.state::<Desktop>();
-            if desktop.installing.load(Ordering::Relaxed) {
+            let mut lifecycle = desktop.lifecycle.lock().unwrap();
+            if *lifecycle == Lifecycle::Installing {
                 api.prevent_exit();
                 app.dialog().message("An app update is being installed. Please quit once it finishes.").title("Vardr update").show(|_| {});
             } else if desktop.activity.load(Ordering::Relaxed) > 0 && !process::STOP.load(Ordering::Relaxed) {
@@ -319,6 +327,8 @@ fn main() {
                 app.dialog().message("A manually started job is still running. Quit and interrupt it? Scheduled jobs run independently and will continue.").title("Quit Vardr?").buttons(MessageDialogButtons::OkCancel).show(move |confirmed| {
                     if confirmed { process::STOP.store(true, Ordering::Relaxed); handle.exit(0); }
                 });
+            } else {
+                *lifecycle = Lifecycle::Closing;
             }
         }
         RunEvent::Exit => {

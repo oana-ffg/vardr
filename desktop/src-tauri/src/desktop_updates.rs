@@ -10,7 +10,7 @@ use vardr::{
     updates::UpdateState,
 };
 
-use crate::Desktop;
+use crate::{Desktop, Lifecycle};
 
 pub fn check(app: AppHandle, manual: bool) {
     let state = app.state::<Desktop>();
@@ -62,9 +62,13 @@ async fn perform(app: &AppHandle, manual: bool) -> Result<()> {
             Some(update) => {
                 if record.installed_version.as_deref() != Some(update.version.as_str()) {
                     // Install the app bundle for its next launch. Do not restart the UI or scheduler.
-                    desktop.installing.store(true, Ordering::Relaxed);
+                    {
+                        let mut lifecycle = desktop.lifecycle.lock().unwrap();
+                        if *lifecycle == Lifecycle::Closing { return Ok(()); }
+                        *lifecycle = Lifecycle::Installing;
+                    }
                     let installation = update.download_and_install(|_, _| {}, || {}).await;
-                    desktop.installing.store(false, Ordering::Relaxed);
+                    *desktop.lifecycle.lock().unwrap() = Lifecycle::Ready;
                     installation?;
                     record.installed_version = Some(update.version.clone());
                 }
