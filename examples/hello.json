@@ -1,0 +1,17 @@
+{
+  "id": "hello",
+  "name": "Hello from Vardr",
+  "purpose": "Try the runner and inspect its output without changing anything else.",
+  "project": "Getting started",
+  "cwd": "/tmp",
+  "target": { "type": "command", "argv": ["/bin/echo", "Hello from Vardr"] },
+  "schedule": { "type": "manual" },
+  "enabled": false,
+  "timeout_seconds": 10,
+  "investigation": {
+    "enabled": false,
+    "target": { "type": "codex" },
+    "cooldown_seconds": 3600,
+    "timeout_seconds": 600
+  }
+}

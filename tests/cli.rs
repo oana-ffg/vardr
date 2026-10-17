@@ -1,0 +1,176 @@
+use serde_json::{Value, json};
+use std::{process::Command, thread};
+use tiny_http::{Header, Response, Server};
+
+fn bin() -> &'static str {
+    env!("CARGO_BIN_EXE_vardr")
+}
+
+#[test]
+fn cli_import_edit_run_and_structured_errors() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("data");
+    let fixture = temp.path().join("job.json");
+    std::fs::write(&fixture,serde_json::to_vec(&json!({"id":"cli-test","name":"CLI test","purpose":"Verify a complete CLI path","cwd":temp.path(),"target":{"type":"command","argv":["/bin/echo","hello-cli"]},"schedule":{"type":"manual"}})).unwrap()).unwrap();
+    let invoke = |args: &[&str]| {
+        Command::new(bin())
+            .arg("--home")
+            .arg(&home)
+            .arg("--json")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    assert!(invoke(&["put", fixture.to_str().unwrap()]).status.success());
+    let paused = invoke(&["pause", "cli-test"]);
+    assert!(paused.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&paused.stdout).unwrap()["enabled"],
+        false
+    );
+    assert!(invoke(&["run", "cli-test"]).status.success());
+    let logs = invoke(&["logs", "cli-test"]);
+    assert!(
+        String::from_utf8(logs.stdout)
+            .unwrap()
+            .contains("hello-cli")
+    );
+    let missing = invoke(&["show", "does-not-exist"]);
+    assert!(!missing.status.success());
+    assert!(serde_json::from_slice::<Value>(&missing.stderr).unwrap()["error"].is_string());
+}
+
+fn t3_dispatch(lose_receipt: bool, gopass: bool) {
+    let server = Server::http("127.0.0.1:0").unwrap();
+    let endpoint = format!("http://{}", server.server_addr());
+    let thread = thread::spawn(move || {
+        for stage in 0..3 {
+            let mut request = server.recv().unwrap();
+            let auth = request
+                .headers()
+                .iter()
+                .find(|h| h.field.equiv("Authorization"))
+                .unwrap();
+            assert_eq!(auth.value.as_str(), "Bearer vardr-test-only-credential");
+            let mut body = String::new();
+            request.as_reader().read_to_string(&mut body).unwrap();
+            let body: Value = serde_json::from_str(&body).unwrap();
+            if stage > 0 {
+                assert!(
+                    request
+                        .headers()
+                        .iter()
+                        .any(|h| h.field.equiv("mcp-session-id")
+                            && h.value.as_str() == "test-session")
+                );
+            }
+            if stage == 0 {
+                assert_eq!(body["method"], "initialize");
+                request.respond(Response::from_string(json!({"jsonrpc":"2.0","id":body["id"],"result":{"protocolVersion":"2025-06-18","capabilities":{},"serverInfo":{"name":"test","version":"1"}}}).to_string()).with_header(Header::from_bytes("Content-Type","application/json").unwrap()).with_header(Header::from_bytes("mcp-session-id","test-session").unwrap())).unwrap();
+            } else if stage == 1 {
+                assert_eq!(body["method"], "notifications/initialized");
+                request.respond(Response::empty(202)).unwrap();
+            } else {
+                assert_eq!(body["method"], "tools/call");
+                assert_eq!(body["params"]["name"], "t3_thread_launch");
+                assert_eq!(body["params"]["arguments"]["projectId"], "test-project");
+                assert_eq!(
+                    body["params"]["arguments"]["runtimeMode"],
+                    "approval-required"
+                );
+                if lose_receipt {
+                    request.respond(Response::empty(502)).unwrap();
+                    continue;
+                }
+                let envelope = json!({"jsonrpc":"2.0","id":body["id"],"result":{"content":[],"structuredContent":{"threadId":"test-thread","runId":"test-run","status":"running"}}});
+                request
+                    .respond(
+                        Response::from_string(format!(
+                            "event: message\r\ndata: {envelope}\r\n\r\n"
+                        ))
+                        .with_header(
+                            Header::from_bytes("Content-Type", "text/event-stream").unwrap(),
+                        ),
+                    )
+                    .unwrap();
+            }
+        }
+    });
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("data");
+    let fixture = temp.path().join("t3.json");
+    let mut target = json!({"type":"t3","endpoint":endpoint,"project_id":"test-project"});
+    if gopass {
+        target["authorization_gopass"] = json!("test-key");
+        let shim = temp.path().join("gopass");
+        std::fs::write(
+            &shim,
+            "#!/bin/sh\nprintf '%s\\n' 'Bearer vardr-test-only-credential'\n",
+        )
+        .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    } else {
+        target["authorization_env"] = json!("VARDR_TEST_T3_AUTH");
+    }
+    std::fs::write(&fixture,serde_json::to_vec(&json!({"id":"t3-test","name":"T3 test","purpose":"Verify real MCP HTTP wire handling against a local fixture","cwd":temp.path(),"target":target,"prompt":"Read-only test","schedule":{"type":"manual"}})).unwrap()).unwrap();
+    assert!(
+        Command::new(bin())
+            .arg("--home")
+            .arg(&home)
+            .arg("put")
+            .arg(&fixture)
+            .output()
+            .unwrap()
+            .status
+            .success()
+    );
+    let result = Command::new(bin())
+        .arg("--home")
+        .arg(&home)
+        .args(["run", "t3-test"])
+        .env("VARDR_TEST_T3_AUTH", "Bearer vardr-test-only-credential")
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                temp.path().display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success() != lose_receipt,
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let result: Value = serde_json::from_slice(&result.stdout).unwrap();
+    assert_eq!(
+        result["status"],
+        if lose_receipt {
+            "dispatch_unknown"
+        } else {
+            "dispatched"
+        }
+    );
+    if lose_receipt {
+        assert!(result["investigation"].is_null());
+    } else {
+        assert_eq!(result["remote"]["threadId"], "test-thread");
+    }
+    thread.join().unwrap();
+}
+
+#[test]
+fn t3_mcp_negotiates_session_and_records_dispatch_not_success() {
+    t3_dispatch(false, false);
+}
+#[test]
+fn t3_lost_launch_response_is_unknown_and_never_retried() {
+    t3_dispatch(true, false);
+}
+#[test]
+fn t3_can_resolve_credentials_from_a_bounded_secret_manager() {
+    t3_dispatch(false, true);
+}
