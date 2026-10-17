@@ -108,6 +108,8 @@ pub fn parse_time(value: &str) -> Result<NaiveTime> {
 pub enum Target {
     Command {
         argv: Vec<String>,
+        #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+        env: BTreeMap<String, String>,
     },
     Codex {
         #[serde(default)]
@@ -132,10 +134,18 @@ pub enum Target {
 impl Target {
     pub fn validate(&self) -> Result<()> {
         match self {
-            Self::Command { argv } => ensure!(
-                !argv.is_empty() && !argv[0].is_empty(),
-                "command argv needs an executable"
-            ),
+            Self::Command { argv, env } => {
+                ensure!(
+                    !argv.is_empty() && !argv[0].is_empty(),
+                    "command argv needs an executable"
+                );
+                ensure!(
+                    env.iter().all(|(key, value)| !key.is_empty()
+                        && !key.contains(['=', '\0'])
+                        && !value.contains('\0')),
+                    "invalid command environment"
+                );
+            }
             Self::T3 {
                 endpoint,
                 authorization_env,

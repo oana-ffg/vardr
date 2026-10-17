@@ -1,6 +1,7 @@
 use crate::model::Outcome;
 use anyhow::{Context, Result};
 use std::{
+    collections::BTreeMap,
     fs::{File, OpenOptions},
     io::{Read, Write},
     os::fd::AsRawFd,
@@ -130,6 +131,18 @@ pub fn execute(
     limit: u64,
     timeout: Duration,
 ) -> Result<Outcome> {
+    execute_with_env(argv, cwd, input, &BTreeMap::new(), log, limit, timeout)
+}
+
+pub(crate) fn execute_with_env(
+    argv: &[String],
+    cwd: &Path,
+    input: Option<&str>,
+    env: &BTreeMap<String, String>,
+    log: &Path,
+    limit: u64,
+    timeout: Duration,
+) -> Result<Outcome> {
     let mut sink = Log {
         file: Some(OpenOptions::new().create_new(true).write(true).open(log)?),
         captured: Vec::new(),
@@ -137,7 +150,7 @@ pub fn execute(
         truncated: false,
         exit_code: None,
     };
-    execute_to(argv, cwd, input, &mut sink, timeout)
+    execute_to(argv, cwd, input, env, &mut sink, timeout)
 }
 
 /// Bounded, in-memory stdout capture for credentials and executable version checks.
@@ -148,7 +161,17 @@ pub(crate) fn capture(
     limit: u64,
     timeout: Duration,
 ) -> Result<Vec<u8>> {
-    let result = capture_result(argv, cwd, limit, timeout)?;
+    capture_input(argv, cwd, None, limit, timeout)
+}
+
+pub(crate) fn capture_input(
+    argv: &[String],
+    cwd: &Path,
+    input: Option<&str>,
+    limit: u64,
+    timeout: Duration,
+) -> Result<Vec<u8>> {
+    let result = capture_inner(argv, cwd, input, limit, timeout)?;
     anyhow::ensure!(
         result.outcome.status == "succeeded",
         "capture command {}",
@@ -169,6 +192,16 @@ pub(crate) fn capture_result(
     limit: u64,
     timeout: Duration,
 ) -> Result<CaptureResult> {
+    capture_inner(argv, cwd, None, limit, timeout)
+}
+
+fn capture_inner(
+    argv: &[String],
+    cwd: &Path,
+    input: Option<&str>,
+    limit: u64,
+    timeout: Duration,
+) -> Result<CaptureResult> {
     let mut sink = Log {
         file: None,
         captured: Vec::new(),
@@ -176,7 +209,7 @@ pub(crate) fn capture_result(
         truncated: false,
         exit_code: None,
     };
-    let result = execute_to(argv, cwd, None, &mut sink, timeout)?;
+    let result = execute_to(argv, cwd, input, &BTreeMap::new(), &mut sink, timeout)?;
     anyhow::ensure!(!sink.truncated, "capture command output exceeded its limit");
     Ok(CaptureResult {
         outcome: result,
@@ -188,11 +221,13 @@ fn execute_to(
     argv: &[String],
     cwd: &Path,
     input: Option<&str>,
+    env: &BTreeMap<String, String>,
     sink: &mut Log,
     timeout: Duration,
 ) -> Result<Outcome> {
     let mut cmd = Command::new(&argv[0]);
     cmd.args(&argv[1..])
+        .envs(env)
         .current_dir(cwd)
         .stdin(if input.is_some() {
             Stdio::piped()

@@ -135,8 +135,42 @@ fn header<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
         .find(|h| h.field.to_string().eq_ignore_ascii_case(name))
         .map(|h| h.value.as_str())
 }
+pub fn snapshot(store: &Store) -> Result<Value> {
+    let inventory = store.jobs()?;
+    let mut errors = inventory.errors;
+    let mut jobs = Vec::new();
+    for job in inventory.jobs {
+        let latest = match store.runs(&job.id) {
+            Ok(runs) => runs.into_iter().next(),
+            Err(e) => {
+                errors.insert(format!("history:{}", job.id), format!("{e:#}"));
+                None
+            }
+        };
+        jobs.push(json!({"job":job,"latest":latest}));
+    }
+    let service_path = store.root.join("service.json");
+    let service: Option<ServiceState> = if service_path.exists() {
+        Some(read_json(&service_path)?)
+    } else {
+        None
+    };
+    let desktop_updates_path = store.root.join("desktop-updates.json");
+    let desktop_updates: Option<Value> = if desktop_updates_path.exists() {
+        Some(read_json(&desktop_updates_path)?)
+    } else {
+        None
+    };
+    Ok(
+        json!({"desktop_updates":desktop_updates,"jobs":jobs,"errors":errors,"service_running":store.is_locked("service")?,"service":service,"version":env!("CARGO_PKG_VERSION")}),
+    )
+}
 fn handle(store: &Store, request: &mut Request, workers: &mut Workers) -> Result<Value> {
     let path = request.url().to_string();
+    let host = header(request, "X-Vardr-Host")
+        .unwrap_or("local")
+        .to_string();
+    let host = host.as_str();
     if request.method() == &Method::Get && path == "/api/hosts" {
         return Ok(serde_json::to_value(crate::hosts::list(store)?)?);
     }
@@ -147,39 +181,23 @@ fn handle(store: &Store, request: &mut Request, workers: &mut Workers) -> Result
         )?)?);
     }
     if request.method() == &Method::Get && path == "/api/jobs" {
-        let inventory = store.jobs()?;
-        let mut errors = inventory.errors;
-        let mut jobs = Vec::new();
-        for job in inventory.jobs {
-            let latest = match store.runs(&job.id) {
-                Ok(runs) => runs.into_iter().next(),
-                Err(e) => {
-                    errors.insert(format!("history:{}", job.id), format!("{e:#}"));
-                    None
-                }
-            };
-            jobs.push(json!({"job":job,"latest":latest}));
-        }
-        let service_path = store.root.join("service.json");
-        let service: Option<ServiceState> = if service_path.exists() {
-            Some(read_json(&service_path)?)
+        return if host == "local" {
+            snapshot(store)
         } else {
-            None
+            crate::hosts::request(store, host, crate::bridge::Operation::Snapshot)
         };
-        let desktop_updates_path = store.root.join("desktop-updates.json");
-        let desktop_updates: Option<Value> = if desktop_updates_path.exists() {
-            Some(read_json(&desktop_updates_path)?)
-        } else {
-            None
-        };
-        return Ok(
-            json!({"desktop_updates":desktop_updates,"jobs":jobs,"errors":errors,"service_running":store.is_locked("service")?,"service":service,"version":env!("CARGO_PKG_VERSION")}),
-        );
     }
     if request.method() == &Method::Get && path.starts_with("/api/logs/") {
-        return Ok(
-            json!({"text":runner::logs(store,path.trim_start_matches("/api/logs/"),false)?}),
-        );
+        let id = path.trim_start_matches("/api/logs/");
+        return if host == "local" {
+            Ok(json!({"text":runner::logs(store,id,false)?}))
+        } else {
+            crate::hosts::request(
+                store,
+                host,
+                crate::bridge::Operation::Logs { id: id.into() },
+            )
+        };
     }
     ensure!(request.method() == &Method::Post, "unknown endpoint");
     ensure!(
@@ -191,9 +209,21 @@ fn handle(store: &Store, request: &mut Request, workers: &mut Workers) -> Result
     ensure!(bytes.len() <= 524_288, "request too large");
     if path == "/api/job" {
         let job: Job = serde_json::from_slice(&bytes)?;
-        return Ok(serde_json::to_value(store.save(job)?)?);
+        return if host == "local" {
+            Ok(serde_json::to_value(store.save(job)?)?)
+        } else {
+            crate::hosts::request(
+                store,
+                host,
+                crate::bridge::Operation::Save { job: Box::new(job) },
+            )
+        };
     }
     if path == "/api/run" {
+        ensure!(
+            host == "local",
+            "Remote Run now requires the CLI on that Mac; no remote run was started"
+        );
         let body: Value = serde_json::from_slice(&bytes)?;
         let id = body
             .get("id")

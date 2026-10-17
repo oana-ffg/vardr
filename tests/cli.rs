@@ -213,3 +213,62 @@ fn private_hosts_round_trip_through_cli_and_unknown_hosts_fail() {
     assert_eq!(hosts, json!([]));
     assert!(!run(&["hosts", "remove", "absent"]).status.success());
 }
+
+#[test]
+fn bridge_preserves_command_environment_and_rejects_conflicting_remote_edits() {
+    use std::io::Write;
+    use std::process::Stdio;
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("data");
+    let request = |operation: Value| {
+        let mut child = Command::new(bin())
+            .arg("--home")
+            .arg(&home)
+            .arg("bridge")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(
+                serde_json::to_string(&json!({"protocol":1,"operation":operation}))
+                    .unwrap()
+                    .as_bytes(),
+            )
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        assert!(output.status.success());
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    let job = json!({"id":"environment-test","name":"Environment test","purpose":"Preserve the original command environment across remote edits","cwd":temp.path(),"target":{"type":"command","argv":["/bin/sh","-c","printf '%s' \"$VARDR_FIXTURE_VALUE\""],"env":{"VARDR_FIXTURE_VALUE":"value with spaces and 'quotes'"}},"schedule":{"type":"manual"}});
+    let saved = request(json!({"type":"save","job":job}))["result"].clone();
+    assert_eq!(saved["revision"], 1);
+    let snapshot = request(json!({"type":"snapshot"}));
+    assert_eq!(snapshot["result"]["jobs"][0]["job"], saved);
+    let mut changed = saved.clone();
+    changed["schedule"] =
+        json!({"type":"daily","time":"09:15","timezone":"Europe/Copenhagen","weekdays":[]});
+    let changed = request(json!({"type":"save","job":changed}))["result"].clone();
+    assert_eq!(changed["target"], saved["target"]);
+    assert_eq!(changed["revision"], 2);
+    assert!(
+        request(json!({"type":"save","job":saved}))["error"]
+            .as_str()
+            .unwrap()
+            .contains("changed since")
+    );
+    let output = Command::new(bin())
+        .arg("--home")
+        .arg(&home)
+        .args(["run", "environment-test"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(
+        request(json!({"type":"logs","id":"environment-test"}))["result"]["text"],
+        "value with spaces and 'quotes'"
+    );
+}

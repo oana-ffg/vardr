@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, ensure};
 use clap::{Parser, Subcommand};
 use serde_json::json;
-use std::{fs, path::PathBuf};
+use std::{fs, io::Read, path::PathBuf};
 use vardr::{
     hosts,
     model::{Job, Schedule},
@@ -92,12 +92,14 @@ enum Commands {
         signature: PathBuf,
     },
     Status,
+    /// Handle one bounded JSON request on stdin for an SSH-connected dashboard.
+    Bridge,
     /// Read-only launchd definitions and runtime snapshot (macOS).
     Discover {
         #[arg(long, default_value = "local")]
         host: String,
     },
-    /// Private SSH connections for read-only launchd discovery.
+    /// Private SSH connections for discovery and remote schedule editing.
     Hosts {
         #[command(subcommand)]
         action: HostAction,
@@ -112,6 +114,8 @@ enum HostAction {
         ssh: String,
         #[arg(long, default_value = "/Applications/Vardr.app/Contents/MacOS/vardr")]
         cli: String,
+        #[arg(long)]
+        remote_home: Option<String>,
     },
     Remove {
         id: String,
@@ -197,7 +201,11 @@ fn entry(cli: Cli) -> Result<()> {
         }
         Commands::Show { id } => output(&store.job(&id)?)?,
         Commands::Put { file } => {
-            let job: Job = read_json(&file.canonicalize()?)?;
+            let job: Job = if file.as_os_str() == "-" {
+                serde_json::from_slice(&stdin_json()?)?
+            } else {
+                read_json(&file.canonicalize()?)?
+            };
             output(&store.save(job)?)?;
         }
         Commands::Pause { id } => {
@@ -347,8 +355,21 @@ fn entry(cli: Cli) -> Result<()> {
         }
         Commands::Hosts { action } => match action {
             HostAction::List => output(&hosts::list(&store)?)?,
-            HostAction::Add { id, ssh, cli } => {
-                hosts::add(&store, hosts::Host { id, ssh, cli })?;
+            HostAction::Add {
+                id,
+                ssh,
+                cli,
+                remote_home,
+            } => {
+                hosts::add(
+                    &store,
+                    hosts::Host {
+                        id,
+                        ssh,
+                        cli,
+                        home: remote_home,
+                    },
+                )?;
                 output(&hosts::list(&store)?)?;
             }
             HostAction::Remove { id } => {
@@ -356,7 +377,18 @@ fn entry(cli: Cli) -> Result<()> {
                 output(&hosts::list(&store)?)?;
             }
         },
+        Commands::Bridge => {
+            let request = serde_json::from_slice(&stdin_json()?)?;
+            output(&vardr::bridge::respond(&store, request))?;
+        }
         Commands::Verify { .. } => unreachable!(),
     }
     Ok(())
+}
+
+fn stdin_json() -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    std::io::stdin().take(524_289).read_to_end(&mut bytes)?;
+    ensure!(bytes.len() <= 524_288, "stdin JSON exceeds size limit");
+    Ok(bytes)
 }

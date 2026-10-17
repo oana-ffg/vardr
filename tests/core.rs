@@ -30,6 +30,7 @@ fn job(cwd: PathBuf, argv: &[&str]) -> Job {
         machine: "fixture".into(),
         cwd,
         target: Target::Command {
+            env: Default::default(),
             argv: argv.iter().map(|s| (*s).into()).collect(),
         },
         prompt: String::new(),
@@ -137,6 +138,7 @@ fn runner_records_failures_and_investigates_once_per_cooldown() {
     j.investigation = Some(Investigation {
         enabled: true,
         target: Target::Command {
+            env: Default::default(),
             argv: vec!["/bin/echo".into(), "investigated".into()],
         },
         cooldown_seconds: 3600,

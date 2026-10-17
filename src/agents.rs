@@ -24,7 +24,9 @@ pub fn execute(
     timeout: Duration,
 ) -> Result<Outcome> {
     match target {
-        Target::Command { argv } => process::execute(argv, cwd, None, log, limit, timeout),
+        Target::Command { argv, env } => {
+            process::execute_with_env(argv, cwd, None, env, log, limit, timeout)
+        }
         Target::Codex { model } => {
             let mut argv = vec![
                 "codex".into(),

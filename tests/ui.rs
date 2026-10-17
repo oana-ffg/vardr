@@ -110,6 +110,22 @@ fn dashboard_requires_private_entry_and_rejects_duplicate_runs() {
             .send()
             .unwrap()
     };
+    let rejected = client
+        .post(format!("{base}/api/job"))
+        .header("X-Vardr-Token", &token)
+        .header("X-Vardr-Host", "absent")
+        .json(&job)
+        .send()
+        .unwrap();
+    assert_eq!(rejected.status(), 400);
+    let local: Value = client
+        .get(format!("{base}/api/jobs"))
+        .header("X-Vardr-Token", &token)
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert!(local["jobs"].as_array().unwrap().is_empty());
     assert!(post("/api/job", job).status().is_success());
     assert!(
         post("/api/run", json!({"id":"ui-test"}))
