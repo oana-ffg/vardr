@@ -6,7 +6,26 @@ Vardr is a lightweight Rust CLI and background runner with an optional native ma
 
 **First draft, v0.4.0.** macOS app; macOS and Linux CLI. No Electron runtime, Node runtime, database server, or always-open browser is needed. Agent processes run only when a task or failure investigation calls for them. Actual agent memory use depends on the chosen agent.
 
-![Vardr dashboard with public demo jobs](docs/dashboard.png)
+**Screenshots use synthetic demo data:** names, machines, schedules, run results, and logs are fictional. The macOS app and browser dashboard share this interface.
+
+![Vardr overview showing job purposes, editable schedules, run status, and an enabled failure investigator](docs/dashboard.png)
+
+<details>
+<summary>More screenshots: run output, launchd inspection, and mobile dashboard</summary>
+
+**Run output.** Filter jobs needing attention and inspect the latest output. A completed investigation does not change the original failed result.
+
+![Latest run output for a fictional website health check, with its failed status and opt-in investigator visible behind the dialog](docs/run-output.png)
+
+**Existing launchd jobs.** Inspect service status, executable paths, and triggers without changing their owner or schedule.
+
+![Read-only launchd inventory with an expanded definition showing KeepAlive and RunAtLoad triggers](docs/launchd.png)
+
+**Mobile browser layout.** The optional browser dashboard adapts to narrow screens.
+
+<img src="docs/mobile-dashboard.png" alt="Vardr browser dashboard on a narrow screen, with daily schedule controls and run actions" width="360">
+
+</details>
 
 ## What works
 
