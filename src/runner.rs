@@ -101,7 +101,7 @@ fn new_record(job: &Job) -> Run {
     }
 }
 
-pub(crate) fn run_job(store: &Store, job: Job, _lock: fs::File) -> Result<Run> {
+pub(crate) fn run_job(store: &Store, job: Job, _lock: crate::store::Lock) -> Result<Run> {
     let id = job.id.as_str();
     job.validate()?;
     let settings = store.settings()?;

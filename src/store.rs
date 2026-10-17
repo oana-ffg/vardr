@@ -8,6 +8,15 @@ use std::{
     path::{Path, PathBuf},
 };
 
+/// Release flock explicitly: a concurrent fork can inherit the open file description,
+/// so closing this process's descriptor alone need not release the lock on Linux.
+pub struct Lock(File);
+impl Drop for Lock {
+    fn drop(&mut self) {
+        let _ = fs2::FileExt::unlock(&self.0);
+    }
+}
+
 #[derive(Clone)]
 pub struct Store {
     pub root: PathBuf,
@@ -153,18 +162,18 @@ impl Store {
             .write(true)
             .open(p)?)
     }
-    pub fn lock(&self, name: &str) -> Result<File> {
+    pub fn lock(&self, name: &str) -> Result<Lock> {
         let file = self.lock_file(name)?;
         fs2::FileExt::try_lock_exclusive(&file)
             .with_context(|| format!("{name} is already running or being changed"))?;
-        Ok(file)
+        Ok(Lock(file))
     }
-    pub fn transaction(&self, name: &str) -> Result<File> {
+    pub fn transaction(&self, name: &str) -> Result<Lock> {
         let file = self.lock_file(name)?;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
             match fs2::FileExt::try_lock_exclusive(&file) {
-                Ok(()) => return Ok(file),
+                Ok(()) => return Ok(Lock(file)),
                 Err(e)
                     if e.raw_os_error() == fs2::lock_contended_error().raw_os_error()
                         && std::time::Instant::now() < deadline =>
@@ -178,7 +187,10 @@ impl Store {
     pub fn is_locked(&self, name: &str) -> Result<bool> {
         let file = self.lock_file(name)?;
         match fs2::FileExt::try_lock_exclusive(&file) {
-            Ok(()) => Ok(false),
+            Ok(()) => {
+                fs2::FileExt::unlock(&file)?;
+                Ok(false)
+            }
             Err(e) if e.raw_os_error() == fs2::lock_contended_error().raw_os_error() => Ok(true),
             Err(e) => Err(e.into()),
         }
