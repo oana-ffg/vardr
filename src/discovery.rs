@@ -226,7 +226,7 @@ fn runtime(job: &mut DiscoveredJob, output: &str) -> Result<()> {
         if let Some(code) = line.strip_prefix("last exit code = ")
             && code != "(never exited)"
         {
-            job.last_exit_code = Some(code.parse()?);
+            job.last_exit_code = Some(code.split(':').next().unwrap().trim().parse()?);
         }
     }
     ensure!(job.state.is_some(), "launchctl did not report a state");
@@ -412,5 +412,7 @@ mod tests {
         runtime(&mut job, "gui/501/org.example.capture = {\n\tstate = running\n\tpid = 42\n\tlast exit code = (never exited)\n}").unwrap();
         assert_eq!(job.pid, Some(42));
         assert!(job.last_exit_code.is_none());
+        runtime(&mut job, "gui/501/org.example.capture = {\n\tstate = spawn scheduled\n\tlast exit code = 78: EX_CONFIG\n}").unwrap();
+        assert_eq!(job.last_exit_code, Some(78));
     }
 }
