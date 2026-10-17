@@ -137,6 +137,15 @@ fn header<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
 }
 fn handle(store: &Store, request: &mut Request, workers: &mut Workers) -> Result<Value> {
     let path = request.url().to_string();
+    if request.method() == &Method::Get && path == "/api/hosts" {
+        return Ok(serde_json::to_value(crate::hosts::list(store)?)?);
+    }
+    if request.method() == &Method::Get && path.starts_with("/api/discover/") {
+        return Ok(serde_json::to_value(crate::hosts::discover(
+            store,
+            path.trim_start_matches("/api/discover/"),
+        )?)?);
+    }
     if request.method() == &Method::Get && path == "/api/jobs" {
         let inventory = store.jobs()?;
         let mut errors = inventory.errors;

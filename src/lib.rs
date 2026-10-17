@@ -1,4 +1,6 @@
 pub mod agents;
+pub mod discovery;
+pub mod hosts;
 pub mod model;
 pub mod process;
 pub mod runner;

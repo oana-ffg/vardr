@@ -71,6 +71,36 @@ fn dashboard_requires_private_entry_and_rejects_duplicate_runs() {
             .status(),
         403
     );
+    for endpoint in ["/api/hosts", "/api/discover/absent"] {
+        assert_eq!(
+            client
+                .get(format!("{base}{endpoint}"))
+                .send()
+                .unwrap()
+                .status(),
+            403
+        );
+    }
+    let hosts: Value = client
+        .get(format!("{base}/api/hosts"))
+        .header("X-Vardr-Token", &token)
+        .send()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(hosts, json!([]));
+    let unavailable = client
+        .get(format!("{base}/api/discover/absent"))
+        .header("X-Vardr-Token", &token)
+        .send()
+        .unwrap();
+    assert_eq!(unavailable.status(), 400);
+    assert!(
+        unavailable.json::<Value>().unwrap()["error"]
+            .as_str()
+            .unwrap()
+            .contains("unknown host")
+    );
     let job = json!({"id":"ui-test","name":"UI test","purpose":"Test authentication and supervised shutdown","cwd":temp.path(),"target":{"type":"command","argv":["/bin/sleep","30"]},"schedule":{"type":"manual"}});
     let post = |path: &str, body: Value| {
         client

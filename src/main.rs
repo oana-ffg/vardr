@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand};
 use serde_json::json;
 use std::{fs, path::PathBuf};
 use vardr::{
+    hosts,
     model::{Job, Schedule},
     process, runner, scheduler, service,
     store::{Store, read_json, write_json},
@@ -91,8 +92,30 @@ enum Commands {
         signature: PathBuf,
     },
     Status,
-    /// Read-only inventory of the current user's launchd jobs (macOS).
-    Discover,
+    /// Read-only launchd definitions and runtime snapshot (macOS).
+    Discover {
+        #[arg(long, default_value = "local")]
+        host: String,
+    },
+    /// Private SSH connections for read-only launchd discovery.
+    Hosts {
+        #[command(subcommand)]
+        action: HostAction,
+    },
+}
+#[derive(Subcommand)]
+enum HostAction {
+    List,
+    Add {
+        id: String,
+        #[arg(long)]
+        ssh: String,
+        #[arg(long, default_value = "/Applications/Vardr.app/Contents/MacOS/vardr")]
+        cli: String,
+    },
+    Remove {
+        id: String,
+    },
 }
 #[derive(Subcommand)]
 enum ServiceAction {
@@ -294,19 +317,45 @@ fn entry(cli: Cli) -> Result<()> {
                 &json!({"home":store.root,"service_running":running,"service":state,"updates":updates,"settings":store.settings()?}),
             )?;
         }
-        Commands::Discover => {
-            ensure!(cfg!(target_os = "macos"), "launchd discovery is macOS-only");
-            let result = std::process::Command::new("launchctl")
-                .arg("list")
-                .output()?;
-            ensure!(result.status.success(), "launchctl list failed");
-            let text = String::from_utf8(result.stdout)?;
+        Commands::Discover { host } => {
+            let inventory = hosts::discover(&store, &host)?;
             if cli.json {
-                output(&json!({"source":"launchctl list","raw":text,"managed":false}))?;
+                output(&inventory)?;
             } else {
-                print!("{text}");
+                println!(
+                    "{} · {} · read-only launchd snapshot",
+                    inventory.machine, inventory.local_time
+                );
+                for job in &inventory.jobs {
+                    let state = if job.disabled == Some(true) {
+                        "disabled"
+                    } else {
+                        job.state
+                            .as_deref()
+                            .unwrap_or(if job.loaded == Some(false) {
+                                "not loaded"
+                            } else {
+                                "unknown"
+                            })
+                    };
+                    println!("{}  [{}]  {}", job.label, state, job.schedule.join("; "));
+                }
+                for (path, error) in &inventory.errors {
+                    eprintln!("{path}: {error}");
+                }
             }
         }
+        Commands::Hosts { action } => match action {
+            HostAction::List => output(&hosts::list(&store)?)?,
+            HostAction::Add { id, ssh, cli } => {
+                hosts::add(&store, hosts::Host { id, ssh, cli })?;
+                output(&hosts::list(&store)?)?;
+            }
+            HostAction::Remove { id } => {
+                hosts::remove(&store, &id)?;
+                output(&hosts::list(&store)?)?;
+            }
+        },
         Commands::Verify { .. } => unreachable!(),
     }
     Ok(())

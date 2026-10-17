@@ -1,8 +1,8 @@
-# Vardr icon concept
+# Vardr application icon
 
 ![Jade guardian owl icon](vardr-icon-v1.png)
 
-Generated with the built-in image_gen tool. This is the original full-resolution concept artwork; it has not yet replaced the bundled application icon.
+Generated with the built-in image_gen tool. This is the original full-resolution application icon artwork. Packaging runs `scripts/prepare-desktop-icons.py` to produce the PNG and ICNS resources from this source, preserving transparency. To rebuild them manually, run `python3 scripts/prepare-desktop-icons.py` from the repository root.
 
 ## Generation prompt
 

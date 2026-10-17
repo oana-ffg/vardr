@@ -27,6 +27,7 @@ struct Log {
     captured: Vec<u8>,
     left: u64,
     truncated: bool,
+    exit_code: Option<i32>,
 }
 impl Log {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<()> {
@@ -134,6 +135,7 @@ pub fn execute(
         captured: Vec::new(),
         left: limit,
         truncated: false,
+        exit_code: None,
     };
     execute_to(argv, cwd, input, &mut sink, timeout)
 }
@@ -146,20 +148,41 @@ pub(crate) fn capture(
     limit: u64,
     timeout: Duration,
 ) -> Result<Vec<u8>> {
+    let result = capture_result(argv, cwd, limit, timeout)?;
+    anyhow::ensure!(
+        result.outcome.status == "succeeded",
+        "capture command {}",
+        result.outcome.status
+    );
+    Ok(result.stdout)
+}
+
+pub(crate) struct CaptureResult {
+    pub outcome: Outcome,
+    pub stdout: Vec<u8>,
+    pub exit_code: Option<i32>,
+}
+
+pub(crate) fn capture_result(
+    argv: &[String],
+    cwd: &Path,
+    limit: u64,
+    timeout: Duration,
+) -> Result<CaptureResult> {
     let mut sink = Log {
         file: None,
         captured: Vec::new(),
         left: limit,
         truncated: false,
+        exit_code: None,
     };
     let result = execute_to(argv, cwd, None, &mut sink, timeout)?;
-    anyhow::ensure!(
-        result.status == "succeeded",
-        "capture command {}",
-        result.status
-    );
     anyhow::ensure!(!sink.truncated, "capture command output exceeded its limit");
-    Ok(sink.captured)
+    Ok(CaptureResult {
+        outcome: result,
+        stdout: sink.captured,
+        exit_code: sink.exit_code,
+    })
 }
 fn execute_to(
     argv: &[String],
@@ -246,6 +269,7 @@ fn execute_to(
                 ));
             } else if group.exited()? {
                 let status = group.finish()?;
+                sink.exit_code = status.code();
                 stdin = None;
                 completed = Some((
                     Instant::now(),

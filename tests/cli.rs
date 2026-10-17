@@ -174,3 +174,42 @@ fn t3_lost_launch_response_is_unknown_and_never_retried() {
 fn t3_can_resolve_credentials_from_a_bounded_secret_manager() {
     t3_dispatch(false, true);
 }
+
+#[test]
+fn private_hosts_round_trip_through_cli_and_unknown_hosts_fail() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("data");
+    let run = |args: &[&str]| {
+        Command::new(bin())
+            .arg("--home")
+            .arg(&home)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let result = run(&["hosts", "add", "test-mac", "--ssh", "test-mac"]);
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let hosts: Value = serde_json::from_slice(&run(&["hosts", "list"]).stdout).unwrap();
+    assert_eq!(hosts[0]["ssh"], "test-mac");
+    assert!(
+        !run(&["hosts", "add", "test-mac", "--ssh", "other"])
+            .status
+            .success()
+    );
+    assert!(
+        !run(&["hosts", "add", "bad", "--ssh=host;touch bad"])
+            .status
+            .success()
+    );
+    let missing = run(&["discover", "--host", "absent", "--json"]);
+    assert!(!missing.status.success());
+    assert!(String::from_utf8_lossy(&missing.stderr).contains("unknown host"));
+    assert!(run(&["hosts", "remove", "test-mac"]).status.success());
+    let hosts: Value = serde_json::from_slice(&run(&["hosts", "list"]).stdout).unwrap();
+    assert_eq!(hosts, json!([]));
+    assert!(!run(&["hosts", "remove", "absent"]).status.success());
+}

@@ -1,5 +1,6 @@
 """Build/stage the matching CLI before Tauri packages the macOS application."""
 import os
+import sys
 import json
 import tomllib
 import pathlib
@@ -20,6 +21,7 @@ if not target:
     target = next(line.removeprefix("host: ") for line in lines if line.startswith("host: "))
 if not target.endswith("apple-darwin"):
     raise SystemExit("The Vardr desktop app currently supports macOS only")
+subprocess.run([sys.executable, str(root / "scripts/prepare-desktop-icons.py")], check=True)
 subprocess.run(["cargo", "build", "--locked", "-p", "vardr", "--release", "--target", target], cwd=root, check=True)
 output = pathlib.Path(os.environ.get("CARGO_TARGET_DIR", root / "target"))
 if not output.is_absolute():

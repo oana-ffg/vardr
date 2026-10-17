@@ -4,7 +4,7 @@ Know what your automations do, why they exist, when they run, and what happened 
 
 Vardr is a lightweight Rust CLI and background runner with an optional native macOS app. Agents use the CLI; humans can use the app or local browser dashboard. Closing the app does not stop scheduled automations. MIT licensed.
 
-**First draft, v0.2.0.** macOS app; macOS and Linux CLI. No Electron runtime, Node runtime, database server, or always-open browser is needed. Agent processes run only when a task or failure investigation calls for them. Actual agent memory use depends on the chosen agent.
+**First draft, v0.3.0.** macOS app; macOS and Linux CLI. No Electron runtime, Node runtime, database server, or always-open browser is needed. Agent processes run only when a task or failure investigation calls for them. Actual agent memory use depends on the chosen agent.
 
 ![Vardr dashboard with public demo jobs](docs/dashboard.png)
 
@@ -15,7 +15,7 @@ Vardr is a lightweight Rust CLI and background runner with an optional native ma
 - Ordinary commands, Codex CLI, Claude Code, and T3 Code launches. Existing Codex/T3 schedules remain independent; Vardr does not modify their scheduler files.
 - Durable run records, bounded streaming logs, timeouts that terminate process groups, per-job overlap prevention, and configurable scheduler concurrency (one by default).
 - Optional **spawn an agent to investigate failures**, with a separate result/log and a per-job cooldown. Investigations diagnose; they do not automatically repair or retry jobs. The original failure stays a failure.
-- Read-only launchd inventory. Discovery does not adopt, alter, or disable existing services.
+- Read-only launchd views for this Mac and connected Macs over SSH. See calendar/interval/event triggers, disabled overrides, and runtime snapshots without adopting or changing existing services.
 - Signed GitHub Release updates using the same standalone-helper pattern as [Ratatoskr Skill Sync](https://github.com/oana-ffg/ratatoskr-skill-sync). Automatic checks run once per local day, from midnight by default, when the scheduler has no workers active.
 
 ## macOS app
@@ -66,6 +66,16 @@ vardr service install
 
 `service install` is macOS-only and installs one per-user LaunchAgent. It runs after login; it does not wake a sleeping Mac or run before the user logs in. On Linux, run `vardr serve` under your existing supervisor. `service remove` removes only the recorded, unchanged Vardr service. No service is installed by building, `init`, or opening the dashboard.
 
+## Existing launchd jobs and connected Macs
+
+The app’s **Existing launchd jobs** section reads user LaunchAgents, global LaunchAgents, and LaunchDaemons. Apple OS services are excluded. Select a Mac and press **Refresh launchd** to take a new snapshot. An unreadable definition or unavailable host is shown as an error, not an empty healthy inventory.
+
+For another Mac, install Vardr there and configure a trusted SSH alias with key-based access, then run `vardr hosts add studio --ssh studio`. The default remote CLI path is `/Applications/Vardr.app/Contents/MacOS/vardr`; override it with `--cli` for another installation. Connections are saved privately in `hosts.json`. Existing SSH host keys must already be trusted. Discovery runs on demand over SSH with bounded output and a timeout; it requires no persistent process on the other Mac.
+
+Discovery displays the executable and selected trigger fields, and omits command arguments and environment variables. Trigger paths and executable paths may still contain private information. Calendar times use the target Mac’s local timezone. Disabled overrides take precedence over the plist default. Runtime status uses diagnostic `launchctl print` output, whose format can change; unsupported fields remain unknown. A last exit code is a reported value, not proof that the job ran recently or fulfilled its purpose.
+
+This view is read-only. Editing schedules, running jobs, and failure investigation controls apply to jobs managed by the local Vardr installation. Existing launchd jobs remain owned by launchd, and remote Vardr jobs are not managed through this connection.
+
 ## CLI for agents
 
 ```sh
@@ -80,6 +90,10 @@ vardr logs hello
 vardr logs hello --investigation
 vardr status --json
 vardr discover --json
+vardr hosts add studio --ssh studio
+vardr discover --host studio --json
+vardr hosts list
+vardr hosts remove studio
 vardr update
 ```
 
@@ -111,7 +125,7 @@ The scheduler checks at most once per day at or after that local time, verifies 
 
 ## Scope
 
-This first version manages one installation at a time. Machine labels describe local jobs; they are not remote-routing instructions. Central multi-machine views, importing/adopting existing launchd definitions, external notifications, event/webhook triggers, dependency graphs, and monitoring a dispatched T3 run to completion are future work. There is no speculative trigger engine running in the background.
+Vardr manages jobs in the local installation and offers read-only launchd views across connected Macs. Machine labels on managed jobs describe local jobs; they are not remote-routing instructions. Importing/adopting existing launchd definitions, external notifications, event/webhook triggers, dependency graphs, and monitoring a dispatched T3 run to completion are future work. There is no speculative trigger engine running in the background.
 
 T3 launches are recorded as **dispatched**, not succeeded. The receipt links to the actual T3 thread; its execution and approvals remain owned by T3. A failed dispatch can trigger investigation, but a later failure inside T3 currently cannot. T3 integrations support environment or gopass credential references and need an authorized reachable MCP endpoint; a temporary per-turn token is not a permanent scheduler credential.
 
