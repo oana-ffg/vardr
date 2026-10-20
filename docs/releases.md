@@ -1,5 +1,9 @@
 # Signed releases and automatic updates
 
+## v0.4.1 security patch
+
+Update `rustls-webpki` to 0.103.16 and `webpki-roots` / `webpki-root-certs` to 1.0.10. These releases distrust the compromised eMudhra intermediate CA keys and update the bundled trust roots used by CLI and desktop HTTPS clients. Signed-update verification, schedules, and local automation data are unchanged.
+
 Vardr uses the standalone-binary update pattern from [Ratatoskr Skill Sync](https://github.com/oana-ffg/ratatoskr-skill-sync), with its own independent signing key.
 
 The standalone CLI endpoint is `https://github.com/oana-ffg/vardr/releases/latest/download/latest.json`. The trusted public key is committed in `src/update-public-key.txt`. It cannot be replaced by a manifest. Update assets use Tauri/Minisign signatures, verified by `minisign-verify` 0.3. The manifest's version must be newer than the installed semantic version, and the verified executable must report the same version before replacement.
