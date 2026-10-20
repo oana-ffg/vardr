@@ -36,3 +36,7 @@ The release workflow also builds Apple Silicon and Intel `Vardr.app` bundles, cr
 While the app is open, it checks at most once per local day at/after the configured update time. It installs a verified app bundle for its next launch without restarting the UI or scheduler. `desktop-updates.json` retains attempts, installed version, and errors; errors appear in the dashboard. Manual checks bypass the daily cadence. Closing the window exits the app, with a confirmation if manual UI work is active. The app refuses to exit in the short interval while the updater is replacing the bundle.
 
 The LaunchAgent points to `bin/vardr` under the data directory, copied atomically during service installation. It never points inside the `.app`. Reinstallation preserves a newer helper rather than downgrading it. The bundled CLI refuses standalone self-replacement; it updates with the app. Its installed service copy continues using the normal headless signed updater.
+
+## v0.4.1 security patch
+
+Update `rustls-webpki` to 0.103.16 and `webpki-roots` / `webpki-root-certs` to 1.0.10. CLI and core HTTPS clients now reject the compromised eMudhra intermediate CA keys. The native macOS desktop updater uses the operating system's certificate verification. Signed-update verification, schedules, and local automation data are unchanged.
