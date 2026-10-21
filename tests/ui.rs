@@ -45,6 +45,14 @@ fn dashboard_requires_private_entry_and_rejects_duplicate_runs() {
         .build()
         .unwrap();
     assert_eq!(client.get(format!("{base}/")).send().unwrap().status(), 403);
+    assert_eq!(
+        client
+            .get(format!("{base}/assets/vardr.png"))
+            .send()
+            .unwrap()
+            .status(),
+        403
+    );
     let page = client.get(&url).send().unwrap();
     assert!(page.status().is_success());
     assert!(
@@ -81,6 +89,17 @@ fn dashboard_requires_private_entry_and_rejects_duplicate_runs() {
             403
         );
     }
+    let icon = client
+        .get(format!("{base}/assets/vardr.png"))
+        .header("Cookie", format!("vardr={token}"))
+        .send()
+        .unwrap();
+    assert!(icon.status().is_success());
+    assert_eq!(icon.headers()["content-type"], "image/png");
+    assert_eq!(
+        icon.bytes().unwrap().as_ref(),
+        include_bytes!("../assets/vardr.png")
+    );
     let hosts: Value = client
         .get(format!("{base}/api/hosts"))
         .header("X-Vardr-Token", &token)

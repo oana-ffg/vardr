@@ -18,5 +18,7 @@ with tempfile.TemporaryDirectory(prefix="vardr-icons-") as directory:
             output = iconset / f"icon_{size}x{size}{suffix}.png"
             subprocess.run(["sips", "--resampleHeightWidth", str(pixels), str(pixels), str(source), "--out", str(output)], check=True, stdout=subprocess.DEVNULL)
     subprocess.run(["iconutil", "--convert", "icns", str(iconset), "--output", str(destination / "icon.icns")], check=True)
-    shutil.copy2(iconset / "icon_128x128.png", destination / "icon.png")
+    for output in (destination / "icon.png", root / "assets/vardr.png", root / "desktop/shell/vardr.png"):
+        output.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(iconset / "icon_128x128.png", output)
 print("Prepared Vardr owl icon resources")

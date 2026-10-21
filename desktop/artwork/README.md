@@ -2,7 +2,7 @@
 
 ![Jade guardian owl icon](vardr-icon-v1.png)
 
-Generated with the built-in image_gen tool. This is the original full-resolution application icon artwork. Packaging runs `scripts/prepare-desktop-icons.py` to produce the PNG and ICNS resources from this source, preserving transparency. To rebuild them manually, run `python3 scripts/prepare-desktop-icons.py` from the repository root.
+Generated with the built-in image_gen tool. This is the original full-resolution application icon artwork. Packaging runs `scripts/prepare-desktop-icons.py` to produce the PNG and ICNS resources from this source, preserving transparency. The generated `assets/vardr.png` is embedded in the CLI for the authenticated dashboard header and favicon; `desktop/shell/vardr.png` supplies the native startup screen. All three views use the same artwork. To rebuild them manually, run `python3 scripts/prepare-desktop-icons.py` from the repository root.
 
 ## Generation prompt
 
