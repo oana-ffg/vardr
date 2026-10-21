@@ -66,12 +66,12 @@ impl Dashboard {
                 h == format!("127.0.0.1:{port}") || h == format!("localhost:{port}")
             });
             if !valid_host {
-                respond(request, 403, "text/plain", "Invalid host".into(), None);
+                respond(request, 403, "text/plain", "Invalid host", None);
                 continue;
             }
             let url = request.url().to_owned();
             let (path, query) = url.split_once('?').unwrap_or((&url, ""));
-            if request.method() == &Method::Get && path == "/" {
+            if request.method() == &Method::Get && matches!(path, "/" | "/assets/vardr.png") {
                 let query_token = query.split('&').find_map(|p| p.strip_prefix("token="));
                 let cookie_ok = header(&request, "Cookie").is_some_and(|c| {
                     c.split(';')
@@ -82,7 +82,17 @@ impl Dashboard {
                         request,
                         403,
                         "text/plain",
-                        "Open the private dashboard URL printed by `vardr ui`.".into(),
+                        "Open the private dashboard URL printed by `vardr ui`.",
+                        None,
+                    );
+                    continue;
+                }
+                if path == "/assets/vardr.png" {
+                    respond(
+                        request,
+                        200,
+                        "image/png",
+                        include_bytes!("../assets/vardr.png").as_slice(),
                         None,
                     );
                     continue;
@@ -246,8 +256,14 @@ fn handle(store: &Store, request: &mut Request, workers: &mut Workers) -> Result
     }
     anyhow::bail!("unknown endpoint")
 }
-fn respond(request: Request, status: u16, content_type: &str, body: String, cookie: Option<&str>) {
-    let mut response = Response::from_string(body).with_status_code(StatusCode(status));
+fn respond(
+    request: Request,
+    status: u16,
+    content_type: &str,
+    body: impl AsRef<[u8]>,
+    cookie: Option<&str>,
+) {
+    let mut response = Response::from_data(body.as_ref()).with_status_code(StatusCode(status));
     for (key, value) in [
         ("Content-Type", content_type),
         ("Cache-Control", "no-store"),

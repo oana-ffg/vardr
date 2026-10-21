@@ -4,7 +4,7 @@ Know what your automations do, why they exist, when they run, and what happened 
 
 Vardr is a lightweight Rust CLI and background runner with an optional native macOS app. Agents use the CLI; humans can use the app or local browser dashboard. Closing the app does not stop scheduled automations. MIT licensed.
 
-**First draft, v0.4.1.** macOS app; macOS and Linux CLI. No Electron runtime, Node runtime, database server, or always-open browser is needed. Agent processes run only when a task or failure investigation calls for them. Actual agent memory use depends on the chosen agent.
+**First draft, v0.4.2.** macOS app; macOS and Linux CLI. No Electron runtime, Node runtime, database server, or always-open browser is needed. Agent processes run only when a task or failure investigation calls for them. Actual agent memory use depends on the chosen agent.
 
 **Screenshots use synthetic demo data:** names, machines, schedules, run results, and logs are fictional. The macOS app and browser dashboard share this interface.
 
