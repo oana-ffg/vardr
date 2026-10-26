@@ -2,6 +2,8 @@ pub mod agents;
 pub mod bridge;
 pub mod discovery;
 pub mod hosts;
+#[cfg(target_os = "macos")]
+mod macos_signing;
 pub mod model;
 pub mod process;
 pub mod runner;

@@ -129,6 +129,8 @@ pub fn install(release: &Release) -> Result<()> {
         std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o755))?;
     }
     let path = file.into_temp_path();
+    #[cfg(target_os = "macos")]
+    crate::macos_signing::verify_update_identity(&executable, &path)?;
     let output = String::from_utf8(crate::process::capture(
         &[path.to_string_lossy().into_owned(), "--version".into()],
         parent,

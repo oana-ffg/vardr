@@ -25,6 +25,16 @@ The macOS app uses Tauri and the system WKWebView. Node is build-time tooling on
 
 The updater enforces HTTPS, bounded manifest/binary downloads, a Minisign signature, a newer semantic version, and an executable-version match. Candidate executables are staged next to the installed binary so a noexec system temp directory does not prevent verification. Version output is captured in memory with a 1 KiB limit and a ten-second timeout. Automatic replacement restarts the scheduler using the same arguments and data directory. In-flight scheduled jobs and investigations defer installation. A failed check/install is saved in `updates.json`; schedules continue to run. Until the first stable release exists, a missing manifest is a no-update result.
 
+### macOS privacy permissions and signing continuity
+
+Minisign authenticates downloaded bytes; it does not provide the Apple code-signing identity used for macOS privacy permissions. An ordinary ad-hoc signature identifies one exact executable hash. Replacing that executable can invalidate Full Disk Access and cause an unattended job to wait on an iCloud or folder-access prompt.
+
+Before replacing a macOS CLI, the updater verifies the candidate against the installed executable's designated requirement and the installed executable against the candidate's requirement. An incompatible or invalid signature fails the update before replacement and is surfaced through the existing update error state. This does not transfer an existing privacy grant to a different signing identity.
+
+Published macOS artifacts must use Developer ID Application signing, with consistent identifiers `dev.vardr.cli` and `dev.vardr.desktop` and the publisher's Apple Team ID. Configure that Team ID as the repository variable `APPLE_TEAM_ID`. Release verification checks the certificate type, Apple trust chain, Team ID, identifier, signature validity, and absence of a build-specific cdhash requirement. Both the embedded CLI and outer application are checked. Unsigned/ad-hoc local development builds remain possible, but cannot pass the publication checks.
+
+Publisher credentials are not yet configured. The release workflow intentionally fails its macOS publication checks until publisher signing is supplied; a Team ID alone does not sign artifacts. Do not bypass these checks to publish another ad-hoc update. The existing v0.4.2 distribution is ad-hoc signed. Moving an existing installation to a publisher identity requires an explicit one-time migration and renewed macOS authorization; afterward compatible publisher-signed updates retain that identity. Verify permissions with an actual scheduler-owned job after migration.
+
 Forks must deliberately replace the endpoint and compiled trust key, and configure their own signing secret. The official repository's secret cannot be used by forks.
 
 ## Desktop app updates

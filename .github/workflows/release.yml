@@ -38,9 +38,13 @@ jobs:
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
         run: |
           mkdir -p artifacts
           cp "target/${{ matrix.target }}/release/vardr" "artifacts/vardr-${{ matrix.platform }}"
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            python3 scripts/macos_signing.py "artifacts/vardr-${{ matrix.platform }}" --identifier dev.vardr.cli --team-id "$APPLE_TEAM_ID"
+          fi
           version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
           npx --yes @tauri-apps/cli@2.12.3 signer sign --app-version "$version" "artifacts/vardr-${{ matrix.platform }}"
       - name: Verify published signature against compiled trust key
@@ -56,8 +60,10 @@ jobs:
       - name: Collect and verify macOS desktop artifacts
         if: runner.os == 'macOS'
         shell: bash
+        env:
+          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
         run: |
-          python3 scripts/check-desktop-bundle.py "target/${{ matrix.target }}/release/bundle/macos/Vardr.app"
+          python3 scripts/check-desktop-bundle.py "target/${{ matrix.target }}/release/bundle/macos/Vardr.app" --publisher-team-id "$APPLE_TEAM_ID"
           cp "target/${{ matrix.target }}/release/bundle/macos/Vardr.app.tar.gz" "artifacts/Vardr-${{ matrix.platform }}.app.tar.gz"
           cp "target/${{ matrix.target }}/release/bundle/macos/Vardr.app.tar.gz.sig" "artifacts/Vardr-${{ matrix.platform }}.app.tar.gz.sig"
           python3 scripts/create-desktop-dmg.py "target/${{ matrix.target }}/release/bundle/macos/Vardr.app" "artifacts/Vardr-${{ matrix.platform }}.dmg"

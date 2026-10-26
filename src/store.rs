@@ -50,7 +50,7 @@ impl Store {
         let mut inventory = JobInventory::default();
         for entry in fs::read_dir(self.root.join("jobs"))? {
             let p = entry?.path();
-            if !p.extension().is_some_and(|x| x == "json") {
+            if p.extension().is_none_or(|x| x != "json") {
                 continue;
             }
             let result = (|| -> Result<Job> {
