@@ -90,6 +90,9 @@ enum Commands {
     Verify {
         binary: PathBuf,
         signature: PathBuf,
+        /// Also require the authenticated signature to bind this release version.
+        #[arg(long)]
+        app_version: Option<String>,
     },
     Status,
     /// Handle one bounded JSON request on stdin for an SSH-connected dashboard.
@@ -145,16 +148,23 @@ fn output(value: &impl serde::Serialize) -> Result<()> {
     Ok(())
 }
 fn entry(cli: Cli) -> Result<()> {
-    if let Commands::Verify { binary, signature } = &cli.command {
+    if let Commands::Verify {
+        binary,
+        signature,
+        app_version,
+    } = &cli.command
+    {
         ensure!(
             fs::metadata(binary)?.len() <= 64 * 1024 * 1024,
             "binary exceeds update size limit"
         );
-        updates::verify(
-            updates::PUBLIC_KEY,
-            &fs::read(binary)?,
-            &fs::read_to_string(signature)?,
-        )?;
+        let bytes = fs::read(binary)?;
+        let signature = fs::read_to_string(signature)?;
+        if let Some(expected) = app_version {
+            updates::verify_version(updates::PUBLIC_KEY, &bytes, &signature, expected)?;
+        } else {
+            updates::verify(updates::PUBLIC_KEY, &bytes, &signature)?;
+        }
         return output(&json!({"verified":true}));
     }
     let root = cli.home.unwrap_or_else(|| {

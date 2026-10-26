@@ -1,4 +1,4 @@
-name: Build signed draft release
+name: Build release candidates
 on:
   workflow_dispatch:
 permissions:
@@ -6,6 +6,8 @@ permissions:
 jobs:
   build:
     if: github.ref == 'refs/heads/main'
+    environment: release
+    timeout-minutes: 60
     strategy:
       matrix:
         include:
@@ -20,77 +22,46 @@ jobs:
             platform: linux-x86_64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/setup-node@v4
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        if: runner.os == 'macOS'
         with:
           node-version: 24
       - run: cargo test --locked
       - run: cargo build --release --locked --target ${{ matrix.target }}
-      - name: Sign standalone binary
-        shell: bash
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
-          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
-        run: |
-          mkdir -p artifacts
-          cp "target/${{ matrix.target }}/release/vardr" "artifacts/vardr-${{ matrix.platform }}"
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            python3 scripts/macos_signing.py "artifacts/vardr-${{ matrix.platform }}" --identifier dev.vardr.cli --team-id "$APPLE_TEAM_ID"
-          fi
-          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
-          npx --yes @tauri-apps/cli@2.12.3 signer sign --app-version "$version" "artifacts/vardr-${{ matrix.platform }}"
-      - name: Verify published signature against compiled trust key
-        run: artifacts/vardr-${{ matrix.platform }} verify artifacts/vardr-${{ matrix.platform }} artifacts/vardr-${{ matrix.platform }}.sig
-      - name: Build and sign macOS app
+      - run: npm ci
+        if: runner.os == 'macOS'
+        working-directory: desktop
+      - name: Build unsigned macOS app candidate
         if: runner.os == 'macOS'
         working-directory: desktop
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
-        run: npx --yes @tauri-apps/cli@2.12.3 build --target ${{ matrix.target }} --bundles app --config '{"bundle":{"createUpdaterArtifacts":true}}'
-      - name: Collect and verify macOS desktop artifacts
+        run: npm run tauri -- build --target ${{ matrix.target }} --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}' -- --locked
+      - name: Stage macOS candidate without AppleDouble metadata
         if: runner.os == 'macOS'
         shell: bash
-        env:
-          APPLE_TEAM_ID: ${{ vars.APPLE_TEAM_ID }}
         run: |
-          python3 scripts/check-desktop-bundle.py "target/${{ matrix.target }}/release/bundle/macos/Vardr.app" --publisher-team-id "$APPLE_TEAM_ID"
-          cp "target/${{ matrix.target }}/release/bundle/macos/Vardr.app.tar.gz" "artifacts/Vardr-${{ matrix.platform }}.app.tar.gz"
-          cp "target/${{ matrix.target }}/release/bundle/macos/Vardr.app.tar.gz.sig" "artifacts/Vardr-${{ matrix.platform }}.app.tar.gz.sig"
-          python3 scripts/create-desktop-dmg.py "target/${{ matrix.target }}/release/bundle/macos/Vardr.app" "artifacts/Vardr-${{ matrix.platform }}.dmg"
-          artifacts/vardr-${{ matrix.platform }} verify "artifacts/Vardr-${{ matrix.platform }}.app.tar.gz" "artifacts/Vardr-${{ matrix.platform }}.app.tar.gz.sig"
-      - uses: actions/upload-artifact@v4
+          mkdir -p artifacts
+          app="target/${{ matrix.target }}/release/bundle/macos/Vardr.app"
+          python3 scripts/check-desktop-bundle.py "$app"
+          ditto --norsrc --noextattr --noacl -c -k --keepParent "$app" "artifacts/Vardr-candidate-${{ matrix.platform }}.zip"
+      - name: Stage Linux candidate
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p artifacts
+          cp target/${{ matrix.target }}/release/vardr artifacts/vardr-${{ matrix.platform }}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.platform }}
           path: artifacts/*
           if-no-files-found: error
-  draft:
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-          merge-multiple: true
-      - name: Create signed-asset manifest and draft
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          version=$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')
-          python3 scripts/release-manifest.py artifacts "$version" "$GITHUB_REPOSITORY"
-          gh release create "v$version" artifacts/* --draft --target "$GITHUB_SHA" --title "Vardr $version" --generate-notes

@@ -26,7 +26,7 @@ fn requirement(path: &Path) -> Result<String> {
         .context("macOS executable has no designated signing requirement")
 }
 
-pub(crate) fn verify_update_identity(installed: &Path, candidate: &Path) -> Result<()> {
+pub fn verify_update_identity(installed: &Path, candidate: &Path) -> Result<()> {
     let installed_requirement = requirement(installed)?;
     let candidate_requirement = requirement(candidate)?;
     // Both directions matter: the candidate must retain existing grants, and a

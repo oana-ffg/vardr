@@ -84,6 +84,32 @@ pub fn verify(public_key: &str, bytes: &[u8], signature: &str) -> Result<()> {
     )?;
     Ok(())
 }
+/// Authenticate the payload and the semantic version bound into its signature.
+pub fn verify_version(
+    public_key: &str,
+    bytes: &[u8],
+    signature: &str,
+    expected: &str,
+) -> Result<()> {
+    verify(public_key, bytes, signature)?;
+    let decoded = base64::engine::general_purpose::STANDARD.decode(signature.trim())?;
+    let parsed = minisign_verify::Signature::decode(std::str::from_utf8(&decoded)?)?;
+    let versions: Vec<_> = parsed
+        .trusted_comment()
+        .split('\t')
+        .filter_map(|field| field.strip_prefix("version:"))
+        .collect();
+    ensure!(
+        versions.len() == 1,
+        "signature must bind exactly one version"
+    );
+    ensure!(
+        semver::Version::parse(versions[0])? == semver::Version::parse(expected)?,
+        "signature version differs from the release version"
+    );
+    Ok(())
+}
+
 pub fn install(release: &Release) -> Result<()> {
     ensure!(
         semver::Version::parse(&release.version)?
@@ -108,7 +134,7 @@ pub fn install(release: &Release) -> Result<()> {
         .take(MAX_BINARY + 1)
         .read_to_end(&mut bytes)?;
     ensure!(bytes.len() as u64 <= MAX_BINARY, "update binary too large");
-    verify(PUBLIC_KEY, &bytes, &asset.signature)?;
+    verify_version(PUBLIC_KEY, &bytes, &asset.signature, &release.version)?;
     let executable = std::env::current_exe()?;
     let bundled = executable
         .parent()

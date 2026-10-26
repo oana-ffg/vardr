@@ -1,6 +1,6 @@
 [package]
 name = "vardr-desktop"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2024"
 rust-version = "1.90"
 license = "MIT"
@@ -19,3 +19,6 @@ tauri-plugin-single-instance = "2"
 tauri-plugin-updater = { version = "2.14", default-features = false, features = ["rustls-tls", "system-proxy"] }
 vardr = { path = "../.." }
 directories = "6"
+flate2 = "1"
+tar = "0.4"
+tempfile = "3"

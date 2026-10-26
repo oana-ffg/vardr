@@ -67,7 +67,18 @@ async fn perform(app: &AppHandle, manual: bool) -> Result<()> {
                         if *lifecycle == Lifecycle::Closing { return Ok(()); }
                         *lifecycle = Lifecycle::Installing;
                     }
-                    let installation = update.download_and_install(|_, _| {}, || {}).await;
+                    let installation: Result<()> = async {
+                        let bytes = update.download(|_, _| {}, || {}).await?;
+                        #[cfg(target_os = "macos")]
+                        {
+                            let executable = std::env::current_exe()?;
+                            let installed = executable.ancestors().find(|path| path.extension().is_some_and(|ext| ext == "app"))
+                                .ok_or_else(|| anyhow::anyhow!("installed app bundle not found"))?;
+                            crate::macos_update::verify_archive(installed, &bytes)?;
+                        }
+                        update.install(bytes)?;
+                        Ok(())
+                    }.await;
                     *desktop.lifecycle.lock().unwrap() = Lifecycle::Ready;
                     installation?;
                     record.installed_version = Some(update.version.clone());
