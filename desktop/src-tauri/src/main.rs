@@ -1,4 +1,6 @@
 mod desktop_updates;
+#[cfg(target_os = "macos")]
+mod macos_update;
 
 use anyhow::{Context, Result};
 use std::{

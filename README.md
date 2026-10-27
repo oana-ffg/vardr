@@ -48,7 +48,7 @@ Download the Apple Silicon or Intel DMG from [GitHub Releases](https://github.co
 
 Closing the app releases its window and UI process. If a manually started UI job is still running, Vardr asks before interrupting it. Jobs owned by the independent scheduler continue. App and CLI use the same data directory; `VARDR_HOME` also works for an isolated app trial.
 
-The scheduler runs a stable copy of the CLI in the private data directory, so replacing or updating the app cannot remove the service executable. App updates leave existing scheduler jobs and run records alone. Update signatures are configured; Apple Developer ID signing/notarization is not yet configured.
+The scheduler runs a stable copy of the CLI in the private data directory, so replacing or updating the app cannot remove the service executable. App updates leave existing scheduler jobs and run records alone. The next-release flow adds local Apple Developer ID signing/notarization while preserving the existing update trust key. Published 0.4.2 remains ad-hoc signed; see [release and one-time permission migration requirements](docs/releases.md) before upgrading.
 
 To build the macOS app from source (Rust and Node are build tools only):
 

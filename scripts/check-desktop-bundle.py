@@ -1,12 +1,15 @@
-"""Verify the packaged app's version, bundled CLI, and ad-hoc code signature."""
+"""Verify an unsigned app candidate, its version and bundled CLI."""
 import pathlib
 import plistlib
 import subprocess
-import sys
+import argparse
 import tomllib
 
 root = pathlib.Path(__file__).resolve().parents[1]
-bundle = pathlib.Path(sys.argv[1]).resolve()
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("bundle")
+args = parser.parse_args()
+bundle = pathlib.Path(args.bundle).resolve()
 version = tomllib.loads((root / "Cargo.toml").read_text())["package"]["version"]
 with (bundle / "Contents/Info.plist").open("rb") as stream:
     info = plistlib.load(stream)

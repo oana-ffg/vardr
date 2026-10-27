@@ -4788,7 +4788,7 @@ dependencies = [
 
 [[package]]
 name = "vardr"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
@@ -4812,17 +4812,20 @@ dependencies = [
 
 [[package]]
 name = "vardr-desktop"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "anyhow",
  "chrono",
  "directories",
+ "flate2",
  "serde_json",
+ "tar",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
  "tauri-plugin-single-instance",
  "tauri-plugin-updater",
+ "tempfile",
  "vardr",
 ]
 
