@@ -67,12 +67,6 @@ pub fn install_from(store: &Store, source: &Path) -> Result<()> {
         "{} from Vardr before 0.5.0 is still installed; run `vardr migrate`, with the --home it was installed from, to replace it",
         legacy.display()
     );
-    let path = write(store, source, &current_path())?;
-    bootstrap(&path).context("installation receipt retained for `service remove`")
-}
-/// Write the LaunchAgent and its receipt without loading it. The caller holds
-/// `service-install`.
-pub(crate) fn write(store: &Store, source: &Path, launch_path: &str) -> Result<PathBuf> {
     let path = plist_path(LABEL)?;
     reject_symlinks(&path)?;
     if path.exists() {
@@ -81,18 +75,37 @@ pub(crate) fn write(store: &Store, source: &Path, launch_path: &str) -> Result<P
             path.display()
         );
     }
+    write(store, source, &current_path())?;
+    bootstrap(&path).context("installation receipt retained for `service remove`")
+}
+/// Write the LaunchAgent and its receipt without loading it. An existing LaunchAgent is
+/// accepted only if it is exactly what this writes, which completes an interrupted
+/// write. The caller holds `service-install`.
+pub(crate) fn write(store: &Store, source: &Path, launch_path: &str) -> Result<PathBuf> {
+    let path = plist_path(LABEL)?;
+    reject_symlinks(&path)?;
     let _service = store
         .lock("service")
         .context("stop the running scheduler before installing")?;
     let helper = stage_helper(store, source)?;
     let content = plan_with_helper(store, &helper, launch_path)?;
-    fs::create_dir_all(path.parent().unwrap())?;
-    use std::io::Write;
-    fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)?
-        .write_all(content.as_bytes())?;
+    match fs::read_to_string(&path) {
+        Ok(existing) => ensure!(
+            existing == content,
+            "{} already exists; remove the recorded service before reinstalling",
+            path.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir_all(path.parent().unwrap())?;
+            use std::io::Write;
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)?
+                .write_all(content.as_bytes())?;
+        }
+        Err(error) => return Err(error.into()),
+    }
     let receipt = Receipt {
         path: path.clone(),
         content,

@@ -173,10 +173,16 @@ fn entry(cli: Cli) -> Result<()> {
         #[cfg(target_os = "macos")]
         {
             let migrated = vardr::migration::migrate(cli.home, &std::env::current_exe()?)?;
-            if !migrated.unconfirmed.is_empty() {
+            if !migrated.reported.is_empty() {
                 eprintln!(
-                    "vardr: the stopped scheduler had reported failures for {}; their last scheduled runs may not have happened, so check their history",
-                    migrated.unconfirmed.join(", ")
+                    "vardr: before stopping, the scheduler had reported errors for {}; their last scheduled runs may not have happened. Details are kept in {}",
+                    migrated
+                        .reported
+                        .iter()
+                        .map(|failure| failure.job.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    migrated.home.join(vardr::migration::REPORTED).display()
                 );
             }
             return output(&migrated);

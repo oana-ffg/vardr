@@ -215,7 +215,7 @@ fn migration_moves_data_and_replaces_the_running_scheduler() {
     assert!(migrated.status.success(), "{}", stderr(&migrated));
     assert_eq!(
         serde_json::from_slice::<Value>(&migrated.stdout).unwrap(),
-        json!({"home": mac.current(), "scheduler": true, "unconfirmed": []})
+        json!({"home": mac.current(), "scheduler": true, "reported": []})
     );
     assert!(scheduler.wait().unwrap().success());
 
@@ -320,7 +320,7 @@ fn custom_homes_keep_their_data_and_replace_the_scheduler() {
     assert!(migrated.status.success(), "{}", stderr(&migrated));
     assert_eq!(
         serde_json::from_slice::<Value>(&migrated.stdout).unwrap(),
-        json!({"home": custom, "scheduler": true, "unconfirmed": []})
+        json!({"home": custom, "scheduler": true, "reported": []})
     );
     mac.assert_replaced(&custom);
     assert_eq!(listed(&mac.with_home(&custom, &["--json", "list"])), "kept");
@@ -348,7 +348,7 @@ fn migration_interrupted_before_its_swap_resumes() {
     let legacy = mac.legacy_install(&mac.legacy());
     fs::write(
         legacy.root.join("migration.json"),
-        r#"{"scheduler":null,"unconfirmed":[]}"#,
+        r#"{"scheduler":null,"reported":[]}"#,
     )
     .unwrap();
     fs::write(
@@ -368,11 +368,11 @@ fn migration_interrupted_before_its_swap_resumes() {
 }
 
 #[test]
-fn failures_reported_by_the_stopped_scheduler_are_kept_in_history() {
+fn job_errors_reported_by_the_stopped_scheduler_are_kept() {
     let mac = Mac::new();
     let legacy = mac.legacy_install(&mac.legacy());
     // A reserved run whose worker failed before recording it, as a 0.4.x scheduler
-    // reports on exit.
+    // reports on exit, beside a scheduler-level error.
     vardr::store::write_json(
         &legacy.root.join("service.json"),
         &json!({"updated_at": null, "pid": 0, "running": [], "errors": {"kept": "timed out acquiring registry", "updater": "offline"}}),
@@ -380,21 +380,40 @@ fn failures_reported_by_the_stopped_scheduler_are_kept_in_history() {
     .unwrap();
     let migrated = mac.vardr(&["--json", "migrate"]);
     assert!(migrated.status.success(), "{}", stderr(&migrated));
-    assert!(stderr(&migrated).contains("check their history"));
+    assert!(stderr(&migrated).contains("may not have happened"));
+    let expected = json!([{"job": "kept", "error": "timed out acquiring registry"}]);
     assert_eq!(
-        serde_json::from_slice::<Value>(&migrated.stdout).unwrap()["unconfirmed"],
-        json!(["kept"])
+        serde_json::from_slice::<Value>(&migrated.stdout).unwrap()["reported"],
+        expected
     );
+    let kept: Value =
+        vardr::store::read_json(&mac.current().join("migration-failures.json")).unwrap();
+    assert_eq!(kept, expected);
     let history = mac.vardr(&["--json", "history", "kept"]);
-    assert!(history.status.success(), "{}", stderr(&history));
-    let runs: Value = serde_json::from_slice(&history.stdout).unwrap();
-    assert_eq!(runs[0]["status"], "interrupted");
-    assert!(
-        runs[0]["error"]
-            .as_str()
-            .unwrap()
-            .contains("timed out acquiring registry")
+    assert_eq!(
+        serde_json::from_slice::<Value>(&history.stdout).unwrap(),
+        json!([])
     );
-    let report: Value = vardr::store::read_json(&mac.current().join("service.json")).unwrap();
-    assert_eq!(report["errors"], json!({"updater": "offline"}));
+}
+
+#[test]
+fn installation_interrupted_between_plist_and_receipt_resumes() {
+    let mac = Mac::new();
+    mac.legacy_install(&mac.legacy());
+    let failed = mac
+        .command()
+        .env("VARDR_TEST_BOOTSTRAP_FAILS", "1")
+        .arg("migrate")
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    // Reconstruct the moment after the new plist was written but before its receipt.
+    let receipt = mac.current().join("service-install.json");
+    let mut recorded: Value = vardr::store::read_json(&receipt).unwrap();
+    recorded["path"] = json!(mac.agent(LEGACY));
+    recorded["content"] = json!(fs::read_to_string(mac.agent(LEGACY)).unwrap());
+    vardr::store::write_json(&receipt, &recorded).unwrap();
+    let finished = mac.vardr(&["migrate"]);
+    assert!(finished.status.success(), "{}", stderr(&finished));
+    mac.assert_replaced(&mac.current());
 }

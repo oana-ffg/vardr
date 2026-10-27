@@ -87,7 +87,7 @@ pub fn run_scheduled(store: &Store, id: &str, revision: u64) -> Result<Run> {
     run_job(store, job, lock)
 }
 
-pub(crate) fn new_record(job: &Job) -> Run {
+fn new_record(job: &Job) -> Run {
     Run {
         id: uuid::Uuid::new_v4().to_string(),
         job_id: job.id.clone(),

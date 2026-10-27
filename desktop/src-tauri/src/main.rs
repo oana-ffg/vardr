@@ -71,10 +71,11 @@ fn offer_migration(app: &AppHandle) {
                 let result = helper().and_then(|path| migration::migrate(explicit_home(), &path));
                 MIGRATING.store(false, Ordering::Relaxed);
                 match result {
-                    Ok(migrated) if !migrated.unconfirmed.is_empty() => {
+                    Ok(migrated) if !migrated.reported.is_empty() => {
                         let handle = app.clone();
+                        let jobs: Vec<_> = migrated.reported.iter().map(|failure| failure.job.as_str()).collect();
                         app.dialog()
-                            .message(format!("Vardr's data moved. Before the move, the scheduler had reported failures for {}; their last scheduled runs may not have happened. Check their history.", migrated.unconfirmed.join(", ")))
+                            .message(format!("Vardr's data moved. Before stopping, the scheduler had reported errors for {}; their last scheduled runs may not have happened. Details are kept in {}.", jobs.join(", "), migrated.home.join(migration::REPORTED).display()))
                             .title("Move Vardr data")
                             .show(move |_| handle.restart());
                     }

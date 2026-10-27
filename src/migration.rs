@@ -30,14 +30,23 @@ pub struct Migrated {
     pub home: PathBuf,
     /// Whether a pre-0.5.0 scheduler was replaced by one under the new identity.
     pub scheduler: bool,
-    /// Jobs whose last scheduled occurrence may not have run; see `preserve_failures`.
-    pub unconfirmed: Vec<String>,
+    /// Errors the stopped scheduler had reported under job ids; see `job_failures`.
+    pub reported: Vec<Reported>,
+}
+
+/// Kept after migration when the stopped scheduler had reported job errors.
+pub const REPORTED: &str = "migration-failures.json";
+
+#[derive(Clone, Deserialize, PartialEq, Serialize)]
+pub struct Reported {
+    pub job: String,
+    pub error: String,
 }
 
 #[derive(Deserialize, Serialize)]
 struct Record {
     scheduler: Option<Legacy>,
-    unconfirmed: Vec<String>,
+    reported: Vec<Reported>,
 }
 
 /// The stopped pre-0.5.0 scheduler: its unedited LaunchAgent and the PATH its jobs use.
@@ -99,18 +108,22 @@ fn start(old: &Store, to: &Path, moving: bool) -> Result<()> {
         let mut locks = vec![stopped(old, deadline)?];
         locks.extend(quiesce(old)?);
         let path = old.root.join(MIGRATION_RECORD);
-        // An earlier attempt interrupted before its swap may have preserved failures.
-        let mut unconfirmed = if path.exists() {
-            read_json::<Record>(&path)?.unconfirmed
+        // Merge with an attempt interrupted before its swap.
+        let mut reported = if path.exists() {
+            read_json::<Record>(&path)?.reported
         } else {
             Vec::new()
         };
-        unconfirmed.extend(preserve_failures(old)?);
+        for failure in job_failures(old)? {
+            if !reported.contains(&failure) {
+                reported.push(failure);
+            }
+        }
         write_json(
             &path,
             &Record {
                 scheduler,
-                unconfirmed,
+                reported,
             },
         )?;
         if moving {
@@ -138,14 +151,15 @@ fn finish(root: &Path, source: &Path) -> Result<Migrated> {
     let path = store.root.join(MIGRATION_RECORD);
     let record: Record = read_json(&path)?;
     let replaced = record.scheduler.is_some();
-    let unconfirmed = record.unconfirmed;
     if let Some(legacy) = record.scheduler {
         (|| -> Result<()> {
             let plist = service::plist_path(LABEL)?;
-            if fs::symlink_metadata(&plist).is_err() {
-                service::write(&store, source, &legacy.launch_path)?;
-            } else {
+            let receipt = store.root.join("service-install.json");
+            // The moved receipt still names the old agent until the new one is written.
+            if read_json::<Receipt>(&receipt)?.path == plist {
                 service::owned_receipt(&store, &plist)?;
+            } else {
+                service::write(&store, source, &legacy.launch_path)?;
             }
             if !service::loaded(LABEL)? {
                 service::bootstrap(&plist)?;
@@ -170,11 +184,14 @@ fn finish(root: &Path, source: &Path) -> Result<Migrated> {
             )
         })?;
     }
+    if !record.reported.is_empty() {
+        write_json(&store.root.join(REPORTED), &record.reported)?;
+    }
     fs::remove_file(path)?;
     Ok(Migrated {
         home: store.root,
         scheduler: replaced,
-        unconfirmed,
+        reported: record.reported,
     })
 }
 
@@ -279,33 +296,23 @@ fn quiesce(store: &Store) -> Result<Vec<Lock>> {
     Ok(locks)
 }
 
-/// A stopped 0.4.x scheduler keeps worker failures only in its final status report,
-/// which the replacement scheduler overwrites. A worker can fail before recording its
-/// reserved run, so keep each failure in that job's history. Nothing is replayed.
-fn preserve_failures(store: &Store) -> Result<Vec<String>> {
+/// The stopped scheduler's last report is overwritten by its replacement, and a worker
+/// can fail before recording its reserved run. Keep every error reported under a job's
+/// id verbatim. Such a key may also name a scheduler-level error, so nothing is inferred
+/// or replayed.
+fn job_failures(store: &Store) -> Result<Vec<Reported>> {
     let path = store.root.join("service.json");
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let mut state: ServiceState = read_json(&path)?;
-    let mut preserved = Vec::new();
-    for job in store.jobs()?.jobs {
-        let Some(error) = state.errors.remove(&job.id) else {
-            continue;
-        };
-        let mut run = crate::runner::new_record(&job);
-        run.status = "interrupted".into();
-        run.finished_at = Some(Utc::now());
-        run.error = Some(format!(
-            "the scheduler stopped for the 0.5.0 migration had reported: {error}; this occurrence may not have run, so inspect its effects before retrying"
-        ));
-        store.record(&run)?;
-        preserved.push(job.id);
-    }
-    if !preserved.is_empty() {
-        write_json(&path, &state)?;
-    }
-    Ok(preserved)
+    let state: ServiceState = read_json(&path)?;
+    let jobs: BTreeSet<String> = store.jobs()?.jobs.into_iter().map(|job| job.id).collect();
+    Ok(state
+        .errors
+        .into_iter()
+        .filter(|(key, _)| jobs.contains(key))
+        .map(|(job, error)| Reported { job, error })
+        .collect())
 }
 
 /// Wait until the stopped scheduler releases the store.
