@@ -17,6 +17,88 @@ impl Drop for Lock {
     }
 }
 
+/// Where a command's data lives.
+pub enum Home {
+    Ready(PathBuf),
+    /// Pre-0.5.0 data, or an unfinished move, that `vardr migrate` must complete first.
+    NeedsMigration {
+        from: PathBuf,
+        to: PathBuf,
+    },
+}
+
+/// Present from just before a migration moves data until its scheduler is replaced.
+pub const MIGRATION_RECORD: &str = "migration.json";
+
+fn project_data(qualifier: &str, organization: &str) -> Result<PathBuf> {
+    Ok(
+        directories::ProjectDirs::from(qualifier, organization, "vardr")
+            .context("home directory required")?
+            .data_local_dir()
+            .to_owned(),
+    )
+}
+
+/// Compares locations that may not exist yet.
+fn same_location(a: &Path, b: &Path) -> bool {
+    let resolve = |path: &Path| {
+        path.canonicalize()
+            .ok()
+            .or_else(|| Some(path.parent()?.canonicalize().ok()?.join(path.file_name()?)))
+            .unwrap_or_else(|| path.to_owned())
+    };
+    resolve(a) == resolve(b)
+}
+
+/// Resolve `--home`/`VARDR_HOME`, or the default. Never start an empty installation
+/// beside unmigrated data: that would hide existing jobs and could install a second
+/// scheduler.
+pub fn resolve_home(explicit: Option<PathBuf>) -> Result<Home> {
+    let home = project_data("com", "firefungames")?;
+    // The pre-0.5.0 macOS default. Other platforms derive one path from either identity.
+    let legacy = Some(project_data("dev", "vardr")?).filter(|legacy| *legacy != home);
+    let root = match explicit {
+        Some(root) => {
+            if let Some(legacy) = &legacy {
+                ensure!(
+                    !same_location(&root, legacy),
+                    "{} is Vardr's data directory from before 0.5.0; `vardr migrate` without --home or VARDR_HOME moves it to {}",
+                    root.display(),
+                    home.display()
+                );
+            }
+            root
+        }
+        // After migration a regular file marks the legacy path; see `migration`.
+        None => match legacy {
+            Some(legacy) if fs::symlink_metadata(&legacy).is_ok_and(|m| !m.is_file()) => {
+                // A migration interrupted before its swap leaves its note at `home`.
+                let interrupted = legacy.join(MIGRATION_RECORD).exists()
+                    && fs::symlink_metadata(&home).is_ok_and(|m| m.is_file());
+                ensure!(
+                    interrupted || fs::symlink_metadata(&home).is_err(),
+                    "Vardr data exists at both {} and {}; keep only one before continuing",
+                    legacy.display(),
+                    home.display()
+                );
+                return Ok(Home::NeedsMigration {
+                    from: legacy,
+                    to: home,
+                });
+            }
+            _ => home,
+        },
+    };
+    Ok(if root.join(MIGRATION_RECORD).exists() {
+        Home::NeedsMigration {
+            from: root.clone(),
+            to: root,
+        }
+    } else {
+        Home::Ready(root)
+    })
+}
+
 #[derive(Clone)]
 pub struct Store {
     pub root: PathBuf,

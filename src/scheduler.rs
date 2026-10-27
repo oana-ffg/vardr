@@ -6,7 +6,7 @@ use crate::{
     updates,
 };
 use anyhow::Result;
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use std::{
     collections::BTreeMap,
     sync::atomic::Ordering,
@@ -127,6 +127,17 @@ fn serve_loop(store: &Store, once: bool) -> Result<bool> {
     report(store, &[], &errors, 0)?;
     Ok(false)
 }
+/// An unreserved occurrence due by `until`. Dispatch passes `until == now`.
+pub(crate) fn due_by(
+    job: &Job,
+    state: &RuntimeState,
+    now: DateTime<Utc>,
+    until: DateTime<Utc>,
+) -> Result<Option<DateTime<Utc>>> {
+    let baseline = job.updated_at.unwrap_or(now);
+    let watermark = state.watermark.map_or(baseline, |w| w.max(baseline));
+    job.schedule.due(watermark, until)
+}
 fn dispatch_due(store: &Store, workers: &mut Workers) -> Result<BTreeMap<String, String>> {
     let settings = store.settings()?;
     let now = Utc::now();
@@ -145,9 +156,7 @@ fn dispatch_due(store: &Store, workers: &mut Workers) -> Result<BTreeMap<String,
         let result = (|| -> Result<Option<chrono::DateTime<Utc>>> {
             let _state_lock = store.transaction(&format!("state-{}", job.id))?;
             let mut state = store.state(&job.id)?;
-            let baseline = job.updated_at.unwrap_or(now);
-            let watermark = state.watermark.map_or(baseline, |w| w.max(baseline));
-            if let Some(due) = job.schedule.due(watermark, now)? {
+            if let Some(due) = due_by(&job, &state, now, now)? {
                 if !job.catch_up && (now - due).num_seconds() > 60 {
                     state.watermark = Some(due);
                     store.save_state(&job.id, &state)?;

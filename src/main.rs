@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use clap::{Parser, Subcommand};
 use serde_json::json;
 use std::{fs, io::Read, path::PathBuf};
@@ -6,7 +6,7 @@ use vardr::{
     hosts,
     model::{Job, Schedule},
     process, runner, scheduler, service,
-    store::{Store, read_json, write_json},
+    store::{Home, Store, read_json, resolve_home, write_json},
     ui, updates,
 };
 
@@ -95,6 +95,8 @@ enum Commands {
         app_version: Option<String>,
     },
     Status,
+    /// Move macOS data and the scheduler from before 0.5.0 to the current identity, once.
+    Migrate,
     /// Handle one bounded JSON request on stdin for an SSH-connected dashboard.
     Bridge,
     /// Read-only launchd definitions and runtime snapshot (macOS).
@@ -167,12 +169,38 @@ fn entry(cli: Cli) -> Result<()> {
         }
         return output(&json!({"verified":true}));
     }
-    let root = cli.home.unwrap_or_else(|| {
-        directories::ProjectDirs::from("dev", "vardr", "vardr")
-            .expect("home directory required")
-            .data_local_dir()
-            .to_path_buf()
-    });
+    if let Commands::Migrate = cli.command {
+        #[cfg(target_os = "macos")]
+        {
+            let migrated = vardr::migration::migrate(cli.home, &std::env::current_exe()?)?;
+            if !migrated.reported.is_empty() {
+                eprintln!(
+                    "vardr: before stopping, the scheduler had reported errors for {}; their last scheduled runs may not have happened. Details are kept in {}",
+                    migrated
+                        .reported
+                        .iter()
+                        .map(|failure| failure.job.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    migrated.home.join(vardr::migration::REPORTED).display()
+                );
+            }
+            return output(&migrated);
+        }
+        #[cfg(not(target_os = "macos"))]
+        bail!("only macOS installations from before 0.5.0 need migration");
+    }
+    let root = match resolve_home(cli.home)? {
+        Home::Ready(root) => root,
+        Home::NeedsMigration { from, to } if from == to => bail!(
+            "migrating {} is unfinished; run `vardr migrate` again, with the same --home if any",
+            to.display()
+        ),
+        Home::NeedsMigration { from, .. } => bail!(
+            "Vardr data from before 0.5.0 is still at {}; run `vardr migrate` once to move it and its scheduler",
+            from.display()
+        ),
+    };
     fs::create_dir_all(&root)?;
     let store = Store::open(root.canonicalize()?)?;
     process::handle_signals();
@@ -391,7 +419,7 @@ fn entry(cli: Cli) -> Result<()> {
             let request = serde_json::from_slice(&stdin_json()?)?;
             output(&vardr::bridge::respond(&store, request))?;
         }
-        Commands::Verify { .. } => unreachable!(),
+        Commands::Verify { .. } | Commands::Migrate => unreachable!(),
     }
     Ok(())
 }

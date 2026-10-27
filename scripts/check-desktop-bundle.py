@@ -3,19 +3,19 @@ import pathlib
 import plistlib
 import subprocess
 import argparse
-import tomllib
 
-root = pathlib.Path(__file__).resolve().parents[1]
+from release_support import APP_ID, version
+
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("bundle")
 args = parser.parse_args()
 bundle = pathlib.Path(args.bundle).resolve()
-version = tomllib.loads((root / "Cargo.toml").read_text())["package"]["version"]
+expected = version()
 with (bundle / "Contents/Info.plist").open("rb") as stream:
     info = plistlib.load(stream)
-assert info["CFBundleIdentifier"] == "dev.vardr.desktop"
-assert info["CFBundleShortVersionString"] == version
+assert info["CFBundleIdentifier"] == APP_ID
+assert info["CFBundleShortVersionString"] == expected
 helper = bundle / "Contents/MacOS/vardr"
-assert subprocess.check_output([str(helper), "--version"], text=True).strip() == f"vardr {version}"
+assert subprocess.check_output([str(helper), "--version"], text=True).strip() == f"vardr {expected}"
 subprocess.run(["codesign", "--verify", "--deep", "--strict", str(bundle)], check=True)
-print(f"Verified Vardr.app {version} with bundled CLI")
+print(f"Verified Vardr.app {expected} with bundled CLI")

@@ -8,9 +8,9 @@ from macos_signing import ROOT, run
 
 REPOSITORY = "oana-ffg/vardr"
 PLATFORMS = ("darwin-aarch64", "darwin-x86_64")
-APP_ID = "dev.vardr.desktop"
-CLI_ID = "dev.vardr.cli"
-INSTALLER_ID = "dev.vardr.installer"
+APP_ID = "com.firefungames.vardr"
+CLI_ID = "com.firefungames.vardr.cli"
+INSTALLER_ID = "com.firefungames.vardr.installer"
 
 
 def version():
