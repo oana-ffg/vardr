@@ -17,6 +17,49 @@ impl Drop for Lock {
     }
 }
 
+/// The data directory used when neither `--home` nor `VARDR_HOME` is given.
+pub enum DefaultHome {
+    Ready(PathBuf),
+    /// macOS data from before 0.5.0 that `vardr migrate` must move first.
+    NeedsMigration {
+        legacy: PathBuf,
+        home: PathBuf,
+    },
+}
+
+fn project_data(qualifier: &str, organization: &str) -> Result<PathBuf> {
+    Ok(
+        directories::ProjectDirs::from(qualifier, organization, "vardr")
+            .context("home directory required")?
+            .data_local_dir()
+            .to_owned(),
+    )
+}
+
+/// The pre-0.5.0 macOS location. Other platforms derive one path from either identity.
+fn legacy_home() -> Result<Option<PathBuf>> {
+    let legacy = project_data("dev", "vardr")?;
+    Ok((legacy != project_data("com", "firefungames")?).then_some(legacy))
+}
+
+/// Never start an empty installation beside unmigrated data: that would hide existing
+/// jobs and could install a second scheduler.
+pub fn default_home() -> Result<DefaultHome> {
+    let home = project_data("com", "firefungames")?;
+    match legacy_home()? {
+        Some(legacy) if fs::symlink_metadata(&legacy).is_ok() => {
+            ensure!(
+                fs::symlink_metadata(&home).is_err(),
+                "Vardr data exists at both {} and {}; keep only one before continuing",
+                legacy.display(),
+                home.display()
+            );
+            Ok(DefaultHome::NeedsMigration { legacy, home })
+        }
+        _ => Ok(DefaultHome::Ready(home)),
+    }
+}
+
 #[derive(Clone)]
 pub struct Store {
     pub root: PathBuf,

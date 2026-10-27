@@ -4,6 +4,7 @@ pub mod discovery;
 pub mod hosts;
 #[cfg(target_os = "macos")]
 pub mod macos_signing;
+pub mod migration;
 pub mod model;
 pub mod process;
 pub mod runner;

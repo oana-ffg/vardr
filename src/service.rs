@@ -7,7 +7,7 @@ use std::{
     process::Command,
 };
 
-const LABEL: &str = "dev.vardr.runner";
+const LABEL: &str = "com.firefungames.vardr.runner";
 fn escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -15,11 +15,13 @@ fn escape(s: &str) -> String {
         .replace('"', "&quot;")
         .replace('\'', "&apos;")
 }
-pub fn plan(store: &Store) -> Result<String> {
-    plan_with_helper(store, &store.root.join("bin/vardr"))
+fn current_path() -> String {
+    std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".into())
 }
-fn plan_with_helper(store: &Store, helper: &Path) -> Result<String> {
-    let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".into());
+pub fn plan(store: &Store) -> Result<String> {
+    plan_with_helper(store, &store.root.join("bin/vardr"), &current_path())
+}
+fn plan_with_helper(store: &Store, helper: &Path, path: &str) -> Result<String> {
     let items = [
         helper.to_string_lossy().into_owned(),
         "--home".into(),
@@ -33,31 +35,40 @@ fn plan_with_helper(store: &Store, helper: &Path) -> Result<String> {
         .join("\n");
     Ok(format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n<plist version=\"1.0\"><dict>\n<key>Label</key><string>{LABEL}</string>\n<key>ProgramArguments</key><array>{args}</array>\n<key>RunAtLoad</key><true/>\n<key>KeepAlive</key><true/>\n<key>ThrottleInterval</key><integer>10</integer>\n<key>EnvironmentVariables</key><dict><key>PATH</key><string>{}</string></dict>\n<key>StandardOutPath</key><string>/dev/null</string>\n<key>StandardErrorPath</key><string>/dev/null</string>\n</dict></plist>\n",
-        escape(&path)
+        escape(path)
     ))
 }
 #[derive(Deserialize, Serialize)]
-struct Receipt {
-    path: PathBuf,
+pub(crate) struct Receipt {
+    pub(crate) path: PathBuf,
     content: String,
 }
-fn service_path() -> Result<PathBuf> {
+pub(crate) fn plist_path(label: &str) -> Result<PathBuf> {
     Ok(directories::BaseDirs::new()
         .context("home directory unavailable")?
         .home_dir()
-        .join("Library/LaunchAgents/dev.vardr.runner.plist"))
+        .join(format!("Library/LaunchAgents/{label}.plist")))
 }
 pub fn install(store: &Store) -> Result<()> {
     install_from(store, &std::env::current_exe()?)
 }
 /// Desktop bundles supply their CLI explicitly; launchd must never run the UI executable.
 pub fn install_from(store: &Store, source: &Path) -> Result<()> {
+    install_with_path(store, source, &current_path())
+}
+pub(crate) fn install_with_path(store: &Store, source: &Path, launch_path: &str) -> Result<()> {
     ensure!(
         cfg!(target_os = "macos"),
         "service installation currently supports macOS; run `vardr serve` under your OS supervisor elsewhere"
     );
     let _lock = store.lock("service-install")?;
-    let path = service_path()?;
+    let legacy = plist_path(crate::migration::LEGACY_LABEL)?;
+    ensure!(
+        fs::symlink_metadata(&legacy).is_err(),
+        "{} from Vardr before 0.5.0 is still installed; run `vardr migrate` to replace it",
+        legacy.display()
+    );
+    let path = plist_path(LABEL)?;
     reject_symlinks(&path)?;
     if path.exists() {
         anyhow::bail!(
@@ -69,7 +80,7 @@ pub fn install_from(store: &Store, source: &Path) -> Result<()> {
         .lock("service")
         .context("stop the running scheduler before installing")?;
     let helper = stage_helper(store, source)?;
-    let content = plan_with_helper(store, &helper)?;
+    let content = plan_with_helper(store, &helper, launch_path)?;
     fs::create_dir_all(path.parent().unwrap())?;
     use std::io::Write;
     fs::OpenOptions::new()
@@ -83,16 +94,7 @@ pub fn install_from(store: &Store, source: &Path) -> Result<()> {
     };
     crate::store::write_json(&store.root.join("service-install.json"), &receipt)?;
     drop(_service);
-    let uid = unsafe { libc::getuid() };
-    let status = Command::new("launchctl")
-        .args(["bootstrap", &format!("gui/{uid}")])
-        .arg(&path)
-        .status()?;
-    ensure!(
-        status.success(),
-        "launchctl bootstrap failed; installation receipt retained for `service remove`"
-    );
-    Ok(())
+    bootstrap(&path).context("installation receipt retained for `service remove`")
 }
 pub fn remove(store: &Store) -> Result<()> {
     ensure!(
@@ -100,19 +102,33 @@ pub fn remove(store: &Store) -> Result<()> {
         "service removal currently supports macOS"
     );
     let _lock = store.lock("service-install")?;
-    let receipt_path = store.root.join("service-install.json");
-    let receipt: Receipt = crate::store::read_json(&receipt_path)?;
+    let receipt = owned_receipt(store, &plist_path(LABEL)?)?;
+    bootout(LABEL)?;
+    fs::remove_file(receipt.path)?;
+    fs::remove_file(store.root.join("service-install.json"))?;
+    Ok(())
+}
+/// The caller holds `service-install`. Refuse a LaunchAgent this data directory did not
+/// write, or one edited since.
+pub(crate) fn owned_receipt(store: &Store, expected: &Path) -> Result<Receipt> {
+    let receipt: Receipt = crate::store::read_json(&store.root.join("service-install.json"))?;
     ensure!(
-        receipt.path == service_path()?,
+        receipt.path == expected,
         "receipt points outside Vardr's service path"
     );
     reject_symlinks(&receipt.path)?;
     ensure!(
         fs::read_to_string(&receipt.path)? == receipt.content,
-        "service was edited externally; refusing removal"
+        "service was edited externally; refusing to change it"
     );
-    let uid = unsafe { libc::getuid() };
-    let target = format!("gui/{uid}/{LABEL}");
+    Ok(receipt)
+}
+fn domain() -> String {
+    format!("gui/{}", unsafe { libc::getuid() })
+}
+/// Returns whether launchd had the agent loaded.
+pub(crate) fn bootout(label: &str) -> Result<bool> {
+    let target = format!("{}/{label}", domain());
     let loaded = Command::new("launchctl")
         .args(["print", &target])
         .output()?
@@ -127,8 +143,18 @@ pub fn remove(store: &Store) -> Result<()> {
             "launchctl bootout failed; service preserved"
         );
     }
-    fs::remove_file(receipt.path)?;
-    fs::remove_file(receipt_path)?;
+    Ok(loaded)
+}
+pub(crate) fn bootstrap(plist: &Path) -> Result<()> {
+    ensure!(
+        Command::new("launchctl")
+            .args(["bootstrap", &domain()])
+            .arg(plist)
+            .status()?
+            .success(),
+        "launchctl bootstrap failed for {}",
+        plist.display()
+    );
     Ok(())
 }
 

@@ -16,7 +16,11 @@ use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
 };
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
-use vardr::{process, service, store::Store, ui::Dashboard};
+use vardr::{
+    migration, process, service,
+    store::{DefaultHome, Store, default_home},
+    ui::Dashboard,
+};
 
 #[derive(PartialEq)]
 enum Lifecycle {
@@ -33,17 +37,45 @@ struct Desktop {
     lifecycle: Mutex<Lifecycle>,
 }
 
-fn data_directory() -> Result<PathBuf> {
-    let root = std::env::var_os("VARDR_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            directories::ProjectDirs::from("dev", "vardr", "vardr")
-                .expect("home directory required")
-                .data_local_dir()
-                .to_owned()
-        });
+/// `None` while data from before 0.5.0 awaits migration.
+fn data_directory() -> Result<Option<PathBuf>> {
+    let root = match std::env::var_os("VARDR_HOME") {
+        Some(root) => PathBuf::from(root),
+        None => match default_home()? {
+            DefaultHome::Ready(root) => root,
+            DefaultHome::NeedsMigration { .. } => return Ok(None),
+        },
+    };
     std::fs::create_dir_all(&root)?;
-    Ok(root.canonicalize()?)
+    Ok(Some(root.canonicalize()?))
+}
+
+/// The app opens no window until the user has moved or declined to move the data.
+fn offer_migration(app: &AppHandle) {
+    let app = app.clone();
+    app.clone()
+        .dialog()
+        .message("This version of Vardr moves its data and scheduler to a new signed identity. Your automations, history, schedules and settings are kept. If a scheduled job is running, Vardr asks you to try again once it finishes.\n\nmacOS will ask again for permissions such as Full Disk Access and Automation.")
+        .title("Move Vardr data")
+        .buttons(MessageDialogButtons::OkCancelCustom("Move".into(), "Quit".into()))
+        .show(move |confirmed| {
+            if !confirmed {
+                app.exit(0);
+                return;
+            }
+            tauri::async_runtime::spawn_blocking(move || {
+                match helper().and_then(|path| migration::migrate(&path)) {
+                    Ok(_) => app.restart(),
+                    Err(error) => {
+                        let handle = app.clone();
+                        app.dialog()
+                            .message(format!("Could not move Vardr's data: {error:#}"))
+                            .title("Move Vardr data")
+                            .show(move |_| handle.exit(0));
+                    }
+                }
+            });
+        });
 }
 
 fn helper() -> Result<PathBuf> {
@@ -251,7 +283,11 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
-            let store = Store::open(data_directory()?)?;
+            let Some(root) = data_directory()? else {
+                offer_migration(app.handle());
+                return Ok(());
+            };
+            let store = Store::open(root)?;
             let dashboard = Dashboard::bind(0)?;
             let url: tauri::Url = dashboard.entry_url().parse()?;
             let origin = url.origin();
@@ -318,7 +354,9 @@ fn main() {
         .expect("Could not open Vardr");
     app.run(|app, event| match event {
         RunEvent::ExitRequested { api, .. } => {
-            let desktop = app.state::<Desktop>();
+            let Some(desktop) = app.try_state::<Desktop>() else {
+                return;
+            };
             let mut lifecycle = desktop.lifecycle.lock().unwrap();
             if *lifecycle == Lifecycle::Installing {
                 api.prevent_exit();
@@ -335,7 +373,7 @@ fn main() {
         }
         RunEvent::Exit => {
             process::STOP.store(true, Ordering::Relaxed);
-            if let Some(server) = app.state::<Desktop>().server.lock().unwrap().take() { let _ = server.join(); }
+            if let Some(server) = app.try_state::<Desktop>().and_then(|desktop| desktop.server.lock().unwrap().take()) { let _ = server.join(); }
         }
         _ => {}
     });

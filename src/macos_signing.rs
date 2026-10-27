@@ -84,7 +84,7 @@ mod tests {
             "--sign",
             "-",
             "--identifier",
-            "dev.vardr.signing-test",
+            "com.firefungames.vardr.signing-test",
             binary.to_str().unwrap(),
         ]);
         binary

@@ -1,12 +1,12 @@
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use clap::{Parser, Subcommand};
 use serde_json::json;
 use std::{fs, io::Read, path::PathBuf};
 use vardr::{
-    hosts,
+    hosts, migration,
     model::{Job, Schedule},
     process, runner, scheduler, service,
-    store::{Store, read_json, write_json},
+    store::{DefaultHome, Store, default_home, read_json, write_json},
     ui, updates,
 };
 
@@ -95,6 +95,8 @@ enum Commands {
         app_version: Option<String>,
     },
     Status,
+    /// Move macOS data and the scheduler from before 0.5.0 to the current identity, once.
+    Migrate,
     /// Handle one bounded JSON request on stdin for an SSH-connected dashboard.
     Bridge,
     /// Read-only launchd definitions and runtime snapshot (macOS).
@@ -167,12 +169,23 @@ fn entry(cli: Cli) -> Result<()> {
         }
         return output(&json!({"verified":true}));
     }
-    let root = cli.home.unwrap_or_else(|| {
-        directories::ProjectDirs::from("dev", "vardr", "vardr")
-            .expect("home directory required")
-            .data_local_dir()
-            .to_path_buf()
-    });
+    if let Commands::Migrate = cli.command {
+        ensure!(
+            cli.home.is_none(),
+            "migrate moves the default data directory; unset --home and VARDR_HOME"
+        );
+        return output(&migration::migrate(&std::env::current_exe()?)?);
+    }
+    let root = match cli.home {
+        Some(root) => root,
+        None => match default_home()? {
+            DefaultHome::Ready(root) => root,
+            DefaultHome::NeedsMigration { legacy, .. } => bail!(
+                "Vardr data from before 0.5.0 is still at {}; run `vardr migrate` once to move it and its scheduler",
+                legacy.display()
+            ),
+        },
+    };
     fs::create_dir_all(&root)?;
     let store = Store::open(root.canonicalize()?)?;
     process::handle_signals();
@@ -391,7 +404,7 @@ fn entry(cli: Cli) -> Result<()> {
             let request = serde_json::from_slice(&stdin_json()?)?;
             output(&vardr::bridge::respond(&store, request))?;
         }
-        Commands::Verify { .. } => unreachable!(),
+        Commands::Verify { .. } | Commands::Migrate => unreachable!(),
     }
     Ok(())
 }
