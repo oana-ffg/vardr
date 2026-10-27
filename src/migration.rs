@@ -47,6 +47,8 @@ pub struct Reported {
 struct Record {
     scheduler: Option<Legacy>,
     reported: Vec<Reported>,
+    /// Whether the data left the old agent's directory, which it can then no longer use.
+    moved: bool,
 }
 
 /// The stopped pre-0.5.0 scheduler: its unedited LaunchAgent and the PATH its jobs use.
@@ -120,6 +122,7 @@ fn start(old: &Store, to: &Path, moving: bool) -> Result<()> {
             &Record {
                 scheduler,
                 reported,
+                moved: moving,
             },
         )?;
         if moving {
@@ -149,7 +152,11 @@ fn finish(root: &Path, source: &Path) -> Result<Migrated> {
     // Until migration finishes, logging in restarts the old agent from its plist. For a
     // custom home it runs on this data again, so stop it as `start` did.
     if record.scheduler.is_some() && service::loaded(LEGACY_LABEL)? {
-        idle(&store)?;
+        // After a move its helper path runs through the note file, so nothing it would
+        // dispatch can run, and an overdue job must not block finishing.
+        if !record.moved {
+            idle(&store)?;
+        }
         service::bootout(LEGACY_LABEL)?;
         drop(stopped(&store, Instant::now() + STOP_WINDOW)?);
         merge(&mut record.reported, job_failures(&store)?);
@@ -351,12 +358,16 @@ fn swap(from: &Path, to: &Path) -> Result<()> {
     );
     match fs::OpenOptions::new().write(true).create_new(true).open(to) {
         Ok(mut file) => file.write_all(note.as_bytes())?,
-        // Left by a migration interrupted before its swap.
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => ensure!(
-            fs::symlink_metadata(to)?.is_file() && fs::read_to_string(to)? == note,
-            "{} already exists",
-            to.display()
-        ),
+        // Left, possibly incomplete, by a migration interrupted before its swap.
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            ensure!(
+                fs::symlink_metadata(to)?.is_file()
+                    && note.starts_with(fs::read_to_string(to)?.as_str()),
+                "{} already exists",
+                to.display()
+            );
+            fs::write(to, &note)?;
+        }
         Err(error) => return Err(error.into()),
     }
     let path = |path: &Path| CString::new(path.as_os_str().as_bytes());

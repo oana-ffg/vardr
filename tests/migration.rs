@@ -349,17 +349,11 @@ fn migration_interrupted_before_its_swap_resumes() {
     let legacy = mac.legacy_install(&mac.legacy());
     fs::write(
         legacy.root.join("migration.json"),
-        r#"{"scheduler":null,"reported":[]}"#,
+        r#"{"scheduler":null,"reported":[],"moved":true}"#,
     )
     .unwrap();
-    fs::write(
-        mac.current(),
-        format!(
-            "Vardr 0.5.0 moved this data directory to {}\n",
-            mac.current().display()
-        ),
-    )
-    .unwrap();
+    // The note was only partly written when the migration was interrupted.
+    fs::write(mac.current(), "Vardr 0.5.0 moved this").unwrap();
     assert!(stderr(&mac.vardr(&["list"])).contains("run `vardr migrate`"));
     let migrated = mac.vardr(&["--json", "migrate"]);
     assert!(migrated.status.success(), "{}", stderr(&migrated));
@@ -467,4 +461,34 @@ fn resume_stops_an_old_agent_restarted_before_migration_finished() {
         json!([{"job": "kept", "error": "late failure"}])
     );
     mac.assert_replaced(&custom);
+}
+
+#[test]
+fn resume_after_a_move_is_not_blocked_by_a_job_now_due() {
+    let mac = Mac::new();
+    let later = (chrono::Utc::now() + chrono::Duration::hours(3)).format("%H:%M");
+    mac.legacy_install_with(
+        &mac.legacy(),
+        json!({"type": "daily", "time": later.to_string(), "timezone": "UTC"}),
+    );
+    let failed = mac
+        .command()
+        .env("VARDR_TEST_BOOTSTRAP_FAILS", "1")
+        .arg("migrate")
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    // Overnight, a login reloads the old agent and the daily slot comes due. The old
+    // agent cannot run it any more: its helper path runs through the note file.
+    fs::write(mac.root.join("loaded"), format!("{LEGACY}\n")).unwrap();
+    let job = mac.current().join("jobs/kept.json");
+    let mut definition: Value = vardr::store::read_json(&job).unwrap();
+    let soon = (chrono::Utc::now() + chrono::Duration::seconds(30)).format("%H:%M");
+    definition["schedule"]["time"] = json!(soon.to_string());
+    definition["updated_at"] = json!(chrono::Utc::now() - chrono::Duration::hours(1));
+    vardr::store::write_json(&job, &definition).unwrap();
+
+    let finished = mac.vardr(&["migrate"]);
+    assert!(finished.status.success(), "{}", stderr(&finished));
+    mac.assert_replaced(&mac.current());
 }
