@@ -3,10 +3,10 @@ use clap::{Parser, Subcommand};
 use serde_json::json;
 use std::{fs, io::Read, path::PathBuf};
 use vardr::{
-    hosts, migration,
+    hosts,
     model::{Job, Schedule},
     process, runner, scheduler, service,
-    store::{DefaultHome, Store, default_home, read_json, write_json},
+    store::{Home, Store, read_json, resolve_home, write_json},
     ui, updates,
 };
 
@@ -170,21 +170,24 @@ fn entry(cli: Cli) -> Result<()> {
         return output(&json!({"verified":true}));
     }
     if let Commands::Migrate = cli.command {
-        ensure!(
-            cli.home.is_none(),
-            "migrate moves the default data directory; unset --home and VARDR_HOME"
-        );
-        return output(&migration::migrate(&std::env::current_exe()?)?);
+        #[cfg(target_os = "macos")]
+        return output(&vardr::migration::migrate(
+            cli.home,
+            &std::env::current_exe()?,
+        )?);
+        #[cfg(not(target_os = "macos"))]
+        bail!("only macOS installations from before 0.5.0 need migration");
     }
-    let root = match cli.home {
-        Some(root) => root,
-        None => match default_home()? {
-            DefaultHome::Ready(root) => root,
-            DefaultHome::NeedsMigration { legacy, .. } => bail!(
-                "Vardr data from before 0.5.0 is still at {}; run `vardr migrate` once to move it and its scheduler",
-                legacy.display()
-            ),
-        },
+    let root = match resolve_home(cli.home)? {
+        Home::Ready(root) => root,
+        Home::NeedsMigration { from, to } if from == to => bail!(
+            "migrating {} is unfinished; run `vardr migrate` again, with the same --home if any",
+            to.display()
+        ),
+        Home::NeedsMigration { from, .. } => bail!(
+            "Vardr data from before 0.5.0 is still at {}; run `vardr migrate` once to move it and its scheduler",
+            from.display()
+        ),
     };
     fs::create_dir_all(&root)?;
     let store = Store::open(root.canonicalize()?)?;

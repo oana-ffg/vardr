@@ -18,7 +18,7 @@ use tauri::{
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
 use vardr::{
     migration, process, service,
-    store::{DefaultHome, Store, default_home},
+    store::{Home, Store, resolve_home},
     ui::Dashboard,
 };
 
@@ -37,14 +37,17 @@ struct Desktop {
     lifecycle: Mutex<Lifecycle>,
 }
 
+/// Set while a migration runs; quitting then could stop it between steps.
+static MIGRATING: AtomicBool = AtomicBool::new(false);
+
+fn explicit_home() -> Option<PathBuf> {
+    std::env::var_os("VARDR_HOME").map(PathBuf::from)
+}
+
 /// `None` while data from before 0.5.0 awaits migration.
 fn data_directory() -> Result<Option<PathBuf>> {
-    let root = match std::env::var_os("VARDR_HOME") {
-        Some(root) => PathBuf::from(root),
-        None => match default_home()? {
-            DefaultHome::Ready(root) => root,
-            DefaultHome::NeedsMigration { .. } => return Ok(None),
-        },
+    let Home::Ready(root) = resolve_home(explicit_home())? else {
+        return Ok(None);
     };
     std::fs::create_dir_all(&root)?;
     Ok(Some(root.canonicalize()?))
@@ -63,8 +66,11 @@ fn offer_migration(app: &AppHandle) {
                 app.exit(0);
                 return;
             }
+            MIGRATING.store(true, Ordering::Relaxed);
             tauri::async_runtime::spawn_blocking(move || {
-                match helper().and_then(|path| migration::migrate(&path)) {
+                let result = helper().and_then(|path| migration::migrate(explicit_home(), &path));
+                MIGRATING.store(false, Ordering::Relaxed);
+                match result {
                     Ok(_) => app.restart(),
                     Err(error) => {
                         let handle = app.clone();
@@ -355,6 +361,10 @@ fn main() {
     app.run(|app, event| match event {
         RunEvent::ExitRequested { api, .. } => {
             let Some(desktop) = app.try_state::<Desktop>() else {
+                if MIGRATING.load(Ordering::Relaxed) {
+                    api.prevent_exit();
+                    app.dialog().message("Vardr is moving its data. It quits or restarts when finished.").title("Move Vardr data").show(|_| {});
+                }
                 return;
             };
             let mut lifecycle = desktop.lifecycle.lock().unwrap();

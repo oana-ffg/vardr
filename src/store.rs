@@ -17,15 +17,18 @@ impl Drop for Lock {
     }
 }
 
-/// The data directory used when neither `--home` nor `VARDR_HOME` is given.
-pub enum DefaultHome {
+/// Where a command's data lives.
+pub enum Home {
     Ready(PathBuf),
-    /// macOS data from before 0.5.0 that `vardr migrate` must move first.
+    /// Pre-0.5.0 data, or an unfinished move, that `vardr migrate` must complete first.
     NeedsMigration {
-        legacy: PathBuf,
-        home: PathBuf,
+        from: PathBuf,
+        to: PathBuf,
     },
 }
+
+/// Present from just before a migration moves data until its scheduler is replaced.
+pub const MIGRATION_RECORD: &str = "migration.json";
 
 fn project_data(qualifier: &str, organization: &str) -> Result<PathBuf> {
     Ok(
@@ -36,28 +39,61 @@ fn project_data(qualifier: &str, organization: &str) -> Result<PathBuf> {
     )
 }
 
-/// The pre-0.5.0 macOS location. Other platforms derive one path from either identity.
-fn legacy_home() -> Result<Option<PathBuf>> {
-    let legacy = project_data("dev", "vardr")?;
-    Ok((legacy != project_data("com", "firefungames")?).then_some(legacy))
+/// Compares locations that may not exist yet.
+fn same_location(a: &Path, b: &Path) -> bool {
+    let resolve = |path: &Path| {
+        path.canonicalize()
+            .ok()
+            .or_else(|| Some(path.parent()?.canonicalize().ok()?.join(path.file_name()?)))
+            .unwrap_or_else(|| path.to_owned())
+    };
+    resolve(a) == resolve(b)
 }
 
-/// Never start an empty installation beside unmigrated data: that would hide existing
-/// jobs and could install a second scheduler.
-pub fn default_home() -> Result<DefaultHome> {
+/// Resolve `--home`/`VARDR_HOME`, or the default. Never start an empty installation
+/// beside unmigrated data: that would hide existing jobs and could install a second
+/// scheduler.
+pub fn resolve_home(explicit: Option<PathBuf>) -> Result<Home> {
     let home = project_data("com", "firefungames")?;
-    match legacy_home()? {
-        Some(legacy) if fs::symlink_metadata(&legacy).is_ok() => {
-            ensure!(
-                fs::symlink_metadata(&home).is_err(),
-                "Vardr data exists at both {} and {}; keep only one before continuing",
-                legacy.display(),
-                home.display()
-            );
-            Ok(DefaultHome::NeedsMigration { legacy, home })
+    // The pre-0.5.0 macOS default. Other platforms derive one path from either identity.
+    let legacy = Some(project_data("dev", "vardr")?).filter(|legacy| *legacy != home);
+    let root = match explicit {
+        Some(root) => {
+            if let Some(legacy) = &legacy {
+                ensure!(
+                    !same_location(&root, legacy),
+                    "{} is Vardr's data directory from before 0.5.0; `vardr migrate` without --home or VARDR_HOME moves it to {}",
+                    root.display(),
+                    home.display()
+                );
+            }
+            root
         }
-        _ => Ok(DefaultHome::Ready(home)),
-    }
+        // After migration a regular file marks the legacy path; see `migration`.
+        None => match legacy {
+            Some(legacy) if fs::symlink_metadata(&legacy).is_ok_and(|m| !m.is_file()) => {
+                ensure!(
+                    fs::symlink_metadata(&home).is_err(),
+                    "Vardr data exists at both {} and {}; keep only one before continuing",
+                    legacy.display(),
+                    home.display()
+                );
+                return Ok(Home::NeedsMigration {
+                    from: legacy,
+                    to: home,
+                });
+            }
+            _ => home,
+        },
+    };
+    Ok(if root.join(MIGRATION_RECORD).exists() {
+        Home::NeedsMigration {
+            from: root.clone(),
+            to: root,
+        }
+    } else {
+        Home::Ready(root)
+    })
 }
 
 #[derive(Clone)]

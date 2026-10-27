@@ -7,7 +7,9 @@ use std::{
     process::Command,
 };
 
-const LABEL: &str = "com.firefungames.vardr.runner";
+pub(crate) const LABEL: &str = "com.firefungames.vardr.runner";
+/// Schedulers installed before 0.5.0; `vardr migrate` replaces them.
+pub(crate) const LEGACY_LABEL: &str = "dev.vardr.runner";
 fn escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -41,7 +43,7 @@ fn plan_with_helper(store: &Store, helper: &Path, path: &str) -> Result<String> 
 #[derive(Deserialize, Serialize)]
 pub(crate) struct Receipt {
     pub(crate) path: PathBuf,
-    content: String,
+    pub(crate) content: String,
 }
 pub(crate) fn plist_path(label: &str) -> Result<PathBuf> {
     Ok(directories::BaseDirs::new()
@@ -54,20 +56,23 @@ pub fn install(store: &Store) -> Result<()> {
 }
 /// Desktop bundles supply their CLI explicitly; launchd must never run the UI executable.
 pub fn install_from(store: &Store, source: &Path) -> Result<()> {
-    install_with_path(store, source, &current_path())
-}
-pub(crate) fn install_with_path(store: &Store, source: &Path, launch_path: &str) -> Result<()> {
     ensure!(
         cfg!(target_os = "macos"),
         "service installation currently supports macOS; run `vardr serve` under your OS supervisor elsewhere"
     );
     let _lock = store.lock("service-install")?;
-    let legacy = plist_path(crate::migration::LEGACY_LABEL)?;
+    let legacy = plist_path(LEGACY_LABEL)?;
     ensure!(
         fs::symlink_metadata(&legacy).is_err(),
-        "{} from Vardr before 0.5.0 is still installed; run `vardr migrate` to replace it",
+        "{} from Vardr before 0.5.0 is still installed; run `vardr migrate`, with the --home it was installed from, to replace it",
         legacy.display()
     );
+    let path = write(store, source, &current_path())?;
+    bootstrap(&path).context("installation receipt retained for `service remove`")
+}
+/// Write the LaunchAgent and its receipt without loading it. The caller holds
+/// `service-install`.
+pub(crate) fn write(store: &Store, source: &Path, launch_path: &str) -> Result<PathBuf> {
     let path = plist_path(LABEL)?;
     reject_symlinks(&path)?;
     if path.exists() {
@@ -93,8 +98,7 @@ pub(crate) fn install_with_path(store: &Store, source: &Path, launch_path: &str)
         content,
     };
     crate::store::write_json(&store.root.join("service-install.json"), &receipt)?;
-    drop(_service);
-    bootstrap(&path).context("installation receipt retained for `service remove`")
+    Ok(path)
 }
 pub fn remove(store: &Store) -> Result<()> {
     ensure!(
@@ -114,7 +118,9 @@ pub(crate) fn owned_receipt(store: &Store, expected: &Path) -> Result<Receipt> {
     let receipt: Receipt = crate::store::read_json(&store.root.join("service-install.json"))?;
     ensure!(
         receipt.path == expected,
-        "receipt points outside Vardr's service path"
+        "the recorded service is {}, not {}; `vardr migrate` replaces a scheduler from before 0.5.0",
+        receipt.path.display(),
+        expected.display()
     );
     reject_symlinks(&receipt.path)?;
     ensure!(
@@ -126,18 +132,20 @@ pub(crate) fn owned_receipt(store: &Store, expected: &Path) -> Result<Receipt> {
 fn domain() -> String {
     format!("gui/{}", unsafe { libc::getuid() })
 }
-/// Returns whether launchd had the agent loaded.
-pub(crate) fn bootout(label: &str) -> Result<bool> {
-    let target = format!("{}/{label}", domain());
-    let loaded = Command::new("launchctl")
-        .args(["print", &target])
+pub(crate) fn loaded(label: &str) -> Result<bool> {
+    Ok(Command::new("launchctl")
+        .args(["print", &format!("{}/{label}", domain())])
         .output()?
         .status
-        .success();
+        .success())
+}
+/// Returns whether launchd had the agent loaded.
+pub(crate) fn bootout(label: &str) -> Result<bool> {
+    let loaded = loaded(label)?;
     if loaded {
         ensure!(
             Command::new("launchctl")
-                .args(["bootout", &target])
+                .args(["bootout", &format!("{}/{label}", domain())])
                 .status()?
                 .success(),
             "launchctl bootout failed; service preserved"
