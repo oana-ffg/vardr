@@ -72,8 +72,11 @@ pub fn resolve_home(explicit: Option<PathBuf>) -> Result<Home> {
         // After migration a regular file marks the legacy path; see `migration`.
         None => match legacy {
             Some(legacy) if fs::symlink_metadata(&legacy).is_ok_and(|m| !m.is_file()) => {
+                // A migration interrupted before its swap leaves its note at `home`.
+                let interrupted = legacy.join(MIGRATION_RECORD).exists()
+                    && fs::symlink_metadata(&home).is_ok_and(|m| m.is_file());
                 ensure!(
-                    fs::symlink_metadata(&home).is_err(),
+                    interrupted || fs::symlink_metadata(&home).is_err(),
                     "Vardr data exists at both {} and {}; keep only one before continuing",
                     legacy.display(),
                     home.display()

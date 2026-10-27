@@ -32,12 +32,17 @@ Vardr 0.5.0 uses the app identifier `com.firefungames.vardr`, CLI signing identi
 
 The signing identifier is part of the designated requirement. 0.4.x apps, scheduler helpers and standalone CLIs therefore refuse the 0.5.0 update and keep running; the app shows the error in its dashboard. This is intended. The guard stays strict because the new identity loses existing privacy grants either way, so the change must be visible. Upgrade once by hand:
 
-1. Wait until no scheduled job is running, then quit the old Vardr app.
+1. Wait until no scheduled job is running or due within a minute, then quit the old Vardr app.
 2. Install Vardr 0.5.0 from the DMG and open it. Choose **Move**, or run `/Applications/Vardr.app/Contents/MacOS/vardr migrate`. An installation with its own `--home`/`VARDR_HOME` keeps that directory; run `vardr --home DIR migrate` to replace its scheduler.
 3. Grant Full Disk Access again to the scheduler helper `~/Library/Application Support/com.firefungames.vardr/bin/vardr`, and to Vardr.app if it had access before. Approve the Automation prompts that jobs raise. Remove the stale old entries in System Settings by hand. macOS also reports the new background item.
 4. Verify permissions with an actual scheduler-owned job.
 
-The migration moves the whole data directory: job definitions, run histories, schedules, settings, connected hosts, update history, ownership receipts and the helper. It refuses before changing anything when the old LaunchAgent was not written from this data directory or was edited since, while a job or investigation runs, or while another command holds a Vardr lock. It holds every job's state lock, so the old scheduler cannot reserve new runs, then waits out the old scheduler's two-second reservation bound and requires every run lock. With all locks held, it stops `dev.vardr.runner` and waits for the scheduler to exit, so two schedulers never run at once. If the move fails, the old agent is restarted.
+The migration moves the whole data directory: job definitions, run histories, schedules, settings, connected hosts, update history, ownership receipts and the helper. It refuses before changing anything in these cases:
+- the old LaunchAgent was not written from this data directory, or was edited since;
+- a job or investigation is running;
+- an enabled job is due within the next minute.
+
+Otherwise it stops `dev.vardr.runner` and waits up to that minute for the scheduler to exit, so two schedulers never run at once. A pre-0.5.0 scheduler cannot be paused, so a run it reserved in the instant before these checks is recorded as interrupted, as with any scheduler stop. The migration then holds every Vardr lock and refuses if another command still uses the data. If a step fails before the data moves, the old agent is restarted.
 
 A record written before the move makes the rest resumable. Data is swapped atomically with a short note at the old path, so pre-0.5.0 processes still using that path fail instead of recreating an empty installation. The new `com.firefungames.vardr.runner` starts with the new helper and the old agent's `PATH`, and only then is the old LaunchAgent removed. If replacing the scheduler fails, `vardr migrate` and the app say so; running it again finishes the remaining steps.
 

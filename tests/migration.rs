@@ -98,9 +98,12 @@ esac
     }
     /// Data, helper, LaunchAgent and receipt as written by Vardr 0.4, at `data`.
     fn legacy_install(&self, data: &Path) -> Store {
+        self.legacy_install_with(data, json!({"type": "manual"}))
+    }
+    fn legacy_install_with(&self, data: &Path, schedule: Value) -> Store {
         let staging = self.root.join("staging");
         let job = self.root.join("job.json");
-        fs::write(&job, serde_json::to_vec(&json!({"id":"kept","name":"Kept","purpose":"Survive the identity migration","cwd":self.root,"target":{"type":"command","argv":["/bin/echo","kept"]},"schedule":{"type":"manual"}})).unwrap()).unwrap();
+        fs::write(&job, serde_json::to_vec(&json!({"id":"kept","name":"Kept","purpose":"Survive the identity migration","cwd":self.root,"target":{"type":"command","argv":["/bin/echo","kept"]},"schedule":schedule})).unwrap()).unwrap();
         let put = self.with_home(&staging, &["put", job.to_str().unwrap()]);
         assert!(put.status.success(), "{put:?}");
         fs::create_dir_all(data.parent().unwrap()).unwrap();
@@ -322,4 +325,40 @@ fn custom_homes_keep_their_data_and_replace_the_scheduler() {
     mac.assert_replaced(&custom);
     assert_eq!(listed(&mac.with_home(&custom, &["--json", "list"])), "kept");
     assert!(!mac.current().exists() && !mac.legacy().exists());
+}
+
+#[test]
+fn migration_refuses_while_a_job_is_due_before_the_scheduler_stops() {
+    let mac = Mac::new();
+    let legacy = mac.legacy_install_with(&mac.legacy(), json!({"type": "interval", "seconds": 30}));
+    let refused = mac.vardr(&["migrate"]);
+    assert!(
+        stderr(&refused).contains("kept is due at"),
+        "{}",
+        stderr(&refused)
+    );
+    assert!(legacy.root.join("jobs/kept.json").exists());
+    assert!(mac.agent(LEGACY).exists());
+    assert!(mac.launchctl_calls().is_empty());
+}
+
+#[test]
+fn migration_interrupted_before_its_swap_resumes() {
+    let mac = Mac::new();
+    let legacy = mac.legacy_install(&mac.legacy());
+    fs::write(legacy.root.join("migration.json"), r#"{"scheduler":null}"#).unwrap();
+    fs::write(
+        mac.current(),
+        format!(
+            "Vardr 0.5.0 moved this data directory to {}\n",
+            mac.current().display()
+        ),
+    )
+    .unwrap();
+    assert!(stderr(&mac.vardr(&["list"])).contains("run `vardr migrate`"));
+    let migrated = mac.vardr(&["--json", "migrate"]);
+    assert!(migrated.status.success(), "{}", stderr(&migrated));
+    mac.assert_replaced(&mac.current());
+    assert_eq!(listed(&mac.vardr(&["--json", "list"])), "kept");
+    assert!(fs::symlink_metadata(mac.legacy()).unwrap().is_file());
 }

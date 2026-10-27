@@ -4,10 +4,12 @@
 //! A record is written before data moves and removed once the new scheduler runs, so a
 //! failed or interrupted migration is finished by running `vardr migrate` again.
 use crate::{
+    model::ServiceState,
     service::{self, LABEL, LEGACY_LABEL, Receipt},
     store::{Home, Lock, MIGRATION_RECORD, Store, read_json, resolve_home, write_json},
 };
 use anyhow::{Context, Result, anyhow, bail, ensure};
+use chrono::{Local, Utc};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
@@ -18,6 +20,10 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+/// The longest the old scheduler may take to stop. Migration refuses when a job is due
+/// within it, so the old scheduler has nothing to dispatch while stopping.
+const STOP_WINDOW: Duration = Duration::from_secs(60);
 
 #[derive(Serialize)]
 pub struct Migrated {
@@ -78,15 +84,17 @@ fn start(old: &Store, to: &Path, moving: bool) -> Result<()> {
         "nothing to migrate: {} has no scheduler from before 0.5.0",
         old.root.display()
     );
-    let mut locks = pause(old)?;
+    idle(old)?;
+    let checked = Instant::now();
     let loaded = scheduler.is_some() && service::bootout(LEGACY_LABEL)?;
-    let wait = if scheduler.is_some() {
-        Duration::from_secs(60)
+    let deadline = if scheduler.is_some() {
+        checked + STOP_WINDOW
     } else {
-        Duration::ZERO
+        checked
     };
     (|| -> Result<()> {
-        locks.push(stopped(old, wait)?);
+        let mut locks = vec![stopped(old, deadline)?];
+        locks.extend(quiesce(old)?);
         write_json(&old.root.join(MIGRATION_RECORD), &Record { scheduler })?;
         if moving {
             swap(&old.root, to)?;
@@ -176,18 +184,47 @@ fn launch_path(plist: &Path) -> Result<String> {
         .to_owned())
 }
 
-/// Keep the old scheduler from starting work, and refuse if any work runs. Schedulers
-/// reserve a run under its state lock, waiting at most two seconds for it; a run
-/// reserved just before then takes its run lock within that bound.
-fn pause(store: &Store) -> Result<Vec<Lock>> {
+/// Refuse unless nothing runs and no job is due before the old scheduler has stopped.
+/// Pre-0.5.0 code cannot be paused, so this is checked without holding its locks. A run
+/// it reserved in the instant before the check is recorded as interrupted, as with any
+/// scheduler stop.
+fn idle(store: &Store) -> Result<()> {
+    let now = Utc::now();
+    let until = now + chrono::Duration::from_std(STOP_WINDOW)?;
+    let service = store.root.join("service.json");
+    if store.is_locked("service")? && service.exists() {
+        let state: ServiceState = read_json(&service)?;
+        ensure!(
+            state.running.is_empty(),
+            "{} is running; migrate once it finishes",
+            state.running.join(", ")
+        );
+    }
+    for job in store.jobs()?.jobs {
+        ensure!(
+            !store.is_locked(&format!("run-{}", job.id))?,
+            "{} is running; migrate once it finishes",
+            job.id
+        );
+        let state = store.state(&job.id)?;
+        if job.enabled
+            && let Some(due) = crate::scheduler::due_by(&job, &state, now, until)?
+        {
+            bail!(
+                "{} is due at {}; migrate once it has run",
+                job.id,
+                due.with_timezone(&Local).format("%H:%M:%S")
+            );
+        }
+    }
+    Ok(())
+}
+
+/// With the scheduler stopped, hold every lock so no other command uses the data while
+/// it moves. Run locks come first: a run in progress needs the others to finish.
+fn quiesce(store: &Store) -> Result<Vec<Lock>> {
     let jobs: Vec<String> = store.jobs()?.jobs.into_iter().map(|job| job.id).collect();
     let mut locks = Vec::new();
-    for id in &jobs {
-        locks.push(store.transaction(&format!("state-{id}"))?);
-    }
-    if !jobs.is_empty() {
-        thread::sleep(Duration::from_secs(3));
-    }
     for id in &jobs {
         locks.push(
             store
@@ -202,7 +239,7 @@ fn pause(store: &Store) -> Result<Vec<Lock>> {
     );
     let held: BTreeSet<String> = jobs
         .iter()
-        .flat_map(|id| [format!("state-{id}"), format!("run-{id}")])
+        .map(|id| format!("run-{id}"))
         .chain(["registry", "service", "service-install"].map(String::from))
         .collect();
     for entry in fs::read_dir(store.root.join("locks"))? {
@@ -224,8 +261,7 @@ fn pause(store: &Store) -> Result<Vec<Lock>> {
 }
 
 /// Wait until the stopped scheduler releases the store.
-fn stopped(store: &Store, wait: Duration) -> Result<Lock> {
-    let deadline = Instant::now() + wait;
+fn stopped(store: &Store, deadline: Instant) -> Result<Lock> {
     loop {
         match store.lock("service") {
             Ok(lock) => return Ok(lock),
@@ -241,17 +277,20 @@ fn stopped(store: &Store, wait: Duration) -> Result<Lock> {
 /// still use the old path then fail instead of recreating an empty installation there.
 fn swap(from: &Path, to: &Path) -> Result<()> {
     use std::io::Write;
-    fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(to)?
-        .write_all(
-            format!(
-                "Vardr 0.5.0 moved this data directory to {}\n",
-                to.display()
-            )
-            .as_bytes(),
-        )?;
+    let note = format!(
+        "Vardr 0.5.0 moved this data directory to {}\n",
+        to.display()
+    );
+    match fs::OpenOptions::new().write(true).create_new(true).open(to) {
+        Ok(mut file) => file.write_all(note.as_bytes())?,
+        // Left by a migration interrupted before its swap.
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => ensure!(
+            fs::symlink_metadata(to)?.is_file() && fs::read_to_string(to)? == note,
+            "{} already exists",
+            to.display()
+        ),
+        Err(error) => return Err(error.into()),
+    }
     let path = |path: &Path| CString::new(path.as_os_str().as_bytes());
     if unsafe { libc::renamex_np(path(from)?.as_ptr(), path(to)?.as_ptr(), libc::RENAME_SWAP) } != 0
     {
