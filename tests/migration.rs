@@ -215,7 +215,7 @@ fn migration_moves_data_and_replaces_the_running_scheduler() {
     assert!(migrated.status.success(), "{}", stderr(&migrated));
     assert_eq!(
         serde_json::from_slice::<Value>(&migrated.stdout).unwrap(),
-        json!({"home": mac.current(), "scheduler": true})
+        json!({"home": mac.current(), "scheduler": true, "unconfirmed": []})
     );
     assert!(scheduler.wait().unwrap().success());
 
@@ -320,7 +320,7 @@ fn custom_homes_keep_their_data_and_replace_the_scheduler() {
     assert!(migrated.status.success(), "{}", stderr(&migrated));
     assert_eq!(
         serde_json::from_slice::<Value>(&migrated.stdout).unwrap(),
-        json!({"home": custom, "scheduler": true})
+        json!({"home": custom, "scheduler": true, "unconfirmed": []})
     );
     mac.assert_replaced(&custom);
     assert_eq!(listed(&mac.with_home(&custom, &["--json", "list"])), "kept");
@@ -346,7 +346,11 @@ fn migration_refuses_while_a_job_is_due_before_the_scheduler_stops() {
 fn migration_interrupted_before_its_swap_resumes() {
     let mac = Mac::new();
     let legacy = mac.legacy_install(&mac.legacy());
-    fs::write(legacy.root.join("migration.json"), r#"{"scheduler":null}"#).unwrap();
+    fs::write(
+        legacy.root.join("migration.json"),
+        r#"{"scheduler":null,"unconfirmed":[]}"#,
+    )
+    .unwrap();
     fs::write(
         mac.current(),
         format!(
@@ -361,4 +365,36 @@ fn migration_interrupted_before_its_swap_resumes() {
     mac.assert_replaced(&mac.current());
     assert_eq!(listed(&mac.vardr(&["--json", "list"])), "kept");
     assert!(fs::symlink_metadata(mac.legacy()).unwrap().is_file());
+}
+
+#[test]
+fn failures_reported_by_the_stopped_scheduler_are_kept_in_history() {
+    let mac = Mac::new();
+    let legacy = mac.legacy_install(&mac.legacy());
+    // A reserved run whose worker failed before recording it, as a 0.4.x scheduler
+    // reports on exit.
+    vardr::store::write_json(
+        &legacy.root.join("service.json"),
+        &json!({"updated_at": null, "pid": 0, "running": [], "errors": {"kept": "timed out acquiring registry", "updater": "offline"}}),
+    )
+    .unwrap();
+    let migrated = mac.vardr(&["--json", "migrate"]);
+    assert!(migrated.status.success(), "{}", stderr(&migrated));
+    assert!(stderr(&migrated).contains("check their history"));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&migrated.stdout).unwrap()["unconfirmed"],
+        json!(["kept"])
+    );
+    let history = mac.vardr(&["--json", "history", "kept"]);
+    assert!(history.status.success(), "{}", stderr(&history));
+    let runs: Value = serde_json::from_slice(&history.stdout).unwrap();
+    assert_eq!(runs[0]["status"], "interrupted");
+    assert!(
+        runs[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("timed out acquiring registry")
+    );
+    let report: Value = vardr::store::read_json(&mac.current().join("service.json")).unwrap();
+    assert_eq!(report["errors"], json!({"updater": "offline"}));
 }

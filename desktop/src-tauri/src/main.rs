@@ -71,6 +71,13 @@ fn offer_migration(app: &AppHandle) {
                 let result = helper().and_then(|path| migration::migrate(explicit_home(), &path));
                 MIGRATING.store(false, Ordering::Relaxed);
                 match result {
+                    Ok(migrated) if !migrated.unconfirmed.is_empty() => {
+                        let handle = app.clone();
+                        app.dialog()
+                            .message(format!("Vardr's data moved. Before the move, the scheduler had reported failures for {}; their last scheduled runs may not have happened. Check their history.", migrated.unconfirmed.join(", ")))
+                            .title("Move Vardr data")
+                            .show(move |_| handle.restart());
+                    }
                     Ok(_) => app.restart(),
                     Err(error) => {
                         let handle = app.clone();

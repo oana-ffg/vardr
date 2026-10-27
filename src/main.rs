@@ -171,10 +171,16 @@ fn entry(cli: Cli) -> Result<()> {
     }
     if let Commands::Migrate = cli.command {
         #[cfg(target_os = "macos")]
-        return output(&vardr::migration::migrate(
-            cli.home,
-            &std::env::current_exe()?,
-        )?);
+        {
+            let migrated = vardr::migration::migrate(cli.home, &std::env::current_exe()?)?;
+            if !migrated.unconfirmed.is_empty() {
+                eprintln!(
+                    "vardr: the stopped scheduler had reported failures for {}; their last scheduled runs may not have happened, so check their history",
+                    migrated.unconfirmed.join(", ")
+                );
+            }
+            return output(&migrated);
+        }
         #[cfg(not(target_os = "macos"))]
         bail!("only macOS installations from before 0.5.0 need migration");
     }
