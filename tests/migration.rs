@@ -223,7 +223,8 @@ fn migration_moves_data_and_replaces_the_running_scheduler() {
     mac.assert_replaced(&mac.current());
     assert_eq!(
         mac.launchctl_calls(),
-        ["print", "bootout", "print", "bootstrap"]
+        // Stop the old agent; on finishing, confirm it was not reloaded, then start the new one.
+        ["print", "bootout", "print", "print", "bootstrap"]
     );
     // Pre-0.5.0 processes still holding the old path cannot recreate it.
     assert!(
@@ -416,4 +417,54 @@ fn installation_interrupted_between_plist_and_receipt_resumes() {
     let finished = mac.vardr(&["migrate"]);
     assert!(finished.status.success(), "{}", stderr(&finished));
     mac.assert_replaced(&mac.current());
+}
+
+#[test]
+fn resume_stops_an_old_agent_restarted_before_migration_finished() {
+    let mac = Mac::new();
+    let custom = mac.root.join("custom");
+    let store = mac.legacy_install(&custom);
+    let failed = mac
+        .command()
+        .env("VARDR_TEST_BOOTSTRAP_FAILS", "1")
+        .arg("--home")
+        .arg(&custom)
+        .arg("migrate")
+        .output()
+        .unwrap();
+    assert!(!failed.status.success());
+    // A login reloads the old plist, whose scheduler runs on this data and reports.
+    fs::write(mac.root.join("loaded"), format!("{LEGACY}\n")).unwrap();
+    vardr::store::write_json(
+        &custom.join("service.json"),
+        &json!({"updated_at": null, "pid": 0, "running": [], "errors": {"kept": "late failure"}}),
+    )
+    .unwrap();
+    let mut scheduler = Command::new("/usr/bin/python3")
+        .args([
+            "-c",
+            "import fcntl, sys, time\nf = open(sys.argv[1], 'a')\nfcntl.flock(f, fcntl.LOCK_EX)\nprint(flush=True)\ntime.sleep(60)",
+        ])
+        .arg(custom.join("locks/service.lock"))
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Read::read(&mut scheduler.stdout.take().unwrap(), &mut [0]).unwrap();
+    assert!(store.is_locked("service").unwrap());
+
+    let finished = mac
+        .command()
+        .env("VARDR_TEST_SERVE_PID", scheduler.id().to_string())
+        .arg("--home")
+        .arg(&custom)
+        .args(["--json", "migrate"])
+        .output()
+        .unwrap();
+    assert!(finished.status.success(), "{}", stderr(&finished));
+    scheduler.wait().unwrap();
+    assert_eq!(
+        serde_json::from_slice::<Value>(&finished.stdout).unwrap()["reported"],
+        json!([{"job": "kept", "error": "late failure"}])
+    );
+    mac.assert_replaced(&custom);
 }

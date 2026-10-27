@@ -114,11 +114,7 @@ fn start(old: &Store, to: &Path, moving: bool) -> Result<()> {
         } else {
             Vec::new()
         };
-        for failure in job_failures(old)? {
-            if !reported.contains(&failure) {
-                reported.push(failure);
-            }
-        }
+        merge(&mut reported, job_failures(old)?);
         write_json(
             &path,
             &Record {
@@ -149,7 +145,16 @@ fn finish(root: &Path, source: &Path) -> Result<Migrated> {
     let store = Store::open(root.canonicalize()?)?;
     let _installing = store.lock("service-install")?;
     let path = store.root.join(MIGRATION_RECORD);
-    let record: Record = read_json(&path)?;
+    let mut record: Record = read_json(&path)?;
+    // Until migration finishes, logging in restarts the old agent from its plist. For a
+    // custom home it runs on this data again, so stop it as `start` did.
+    if record.scheduler.is_some() && service::loaded(LEGACY_LABEL)? {
+        idle(&store)?;
+        service::bootout(LEGACY_LABEL)?;
+        drop(stopped(&store, Instant::now() + STOP_WINDOW)?);
+        merge(&mut record.reported, job_failures(&store)?);
+        write_json(&path, &record)?;
+    }
     let replaced = record.scheduler.is_some();
     if let Some(legacy) = record.scheduler {
         (|| -> Result<()> {
@@ -313,6 +318,14 @@ fn job_failures(store: &Store) -> Result<Vec<Reported>> {
         .filter(|(key, _)| jobs.contains(key))
         .map(|(job, error)| Reported { job, error })
         .collect())
+}
+
+fn merge(reported: &mut Vec<Reported>, failures: Vec<Reported>) {
+    for failure in failures {
+        if !reported.contains(&failure) {
+            reported.push(failure);
+        }
+    }
 }
 
 /// Wait until the stopped scheduler releases the store.

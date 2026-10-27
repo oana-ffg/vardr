@@ -96,13 +96,20 @@ pub(crate) fn write(store: &Store, source: &Path, launch_path: &str) -> Result<P
             path.display()
         ),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir_all(path.parent().unwrap())?;
+            // Publish complete content only, so an interruption never leaves a partial
+            // plist that a retry would have to reject.
+            let parent = path
+                .parent()
+                .context("LaunchAgent has no parent directory")?;
+            fs::create_dir_all(parent)?;
+            let mut file = tempfile::Builder::new()
+                .prefix(&format!(".{LABEL}."))
+                .tempfile_in(parent)?;
             use std::io::Write;
-            fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)?
-                .write_all(content.as_bytes())?;
+            file.write_all(content.as_bytes())?;
+            file.as_file().sync_all()?;
+            file.persist_noclobber(&path).map_err(|e| e.error)?;
+            fs::File::open(parent)?.sync_all()?;
         }
         Err(error) => return Err(error.into()),
     }
