@@ -163,21 +163,22 @@ impl Store {
     }
     pub fn job(&self, id: &str) -> Result<Job> {
         let path = self.job_path(id)?;
-        ensure!(path.exists(), "no job named {id}");
+        ensure!(path.try_exists()?, "no job named {id}");
         read_json(&path)
     }
     /// Callers that write per-job files check this under the registry lock or the
     /// job's state lock. `remove` holds both while deleting, so a removed job's files
     /// are never recreated.
     pub fn has_job(&self, id: &str) -> Result<bool> {
-        Ok(self.job_path(id)?.exists())
+        Ok(self.job_path(id)?.try_exists()?)
     }
     /// The last revision of a removed job. A job recreated with its ID continues
     /// from there, so a stale edit or pending dispatch of the removed job, which
     /// carries its revision, never matches the replacement.
     fn removed_revision(&self, id: &str) -> Result<u64> {
         let path = self.root.join("removed").join(format!("{id}.json"));
-        Ok(if path.exists() {
+        // An unreadable record must fail rather than count as absent.
+        Ok(if path.try_exists()? {
             read_json::<Removed>(&path)?.revision
         } else {
             0
@@ -198,10 +199,10 @@ impl Store {
         let state = self.root.join("state").join(format!("{id}.json"));
         let runs = self.root.join("runs").join(id);
         ensure!(
-            path.exists() || state.exists() || runs.exists(),
+            path.try_exists()? || state.try_exists()? || runs.try_exists()?,
             "no job named {id}"
         );
-        if path.exists() {
+        if path.try_exists()? {
             // Only the revision is needed, so a definition that no longer validates
             // can still be removed.
             let revision = read_json::<Removed>(&path)
@@ -213,10 +214,13 @@ impl Store {
                 })?
                 .revision;
             let revision = revision.max(self.removed_revision(id)?);
-            write_json(
-                &self.root.join("removed").join(format!("{id}.json")),
-                &Removed { revision },
-            )?;
+            // The record must survive a crash that the deletions below survive,
+            // including the entry of a newly created `removed/` in the data root.
+            let removed = self.root.join("removed");
+            reject_symlinks(&removed)?;
+            fs::create_dir_all(&removed)?;
+            sync_parent(&removed)?;
+            write_json(&removed.join(format!("{id}.json")), &Removed { revision })?;
         }
         // The definition goes first: without it nothing schedules the job, whereas
         // a job without its state could replay occurrences it already ran.
@@ -229,7 +233,7 @@ impl Store {
             }
         }
         reject_symlinks(&runs)?;
-        if runs.exists() {
+        if runs.try_exists()? {
             fs::remove_dir_all(&runs)?;
             sync_parent(&runs)?;
         }
@@ -239,7 +243,7 @@ impl Store {
         job.validate()?;
         let _lock = self.transaction("registry")?;
         let path = self.root.join("jobs").join(format!("{}.json", job.id));
-        let previous: Option<Job> = if path.exists() {
+        let previous: Option<Job> = if path.try_exists()? {
             Some(read_json(&path)?)
         } else {
             None

@@ -340,6 +340,18 @@ fn cli_remove_deletes_a_job_with_its_state_and_history() {
     );
     assert!(!runs.exists());
 
+    // An unreadable revision record refuses recreation instead of restarting at 1.
+    // Root bypasses permissions, so the check only holds for ordinary users.
+    if unsafe { libc::geteuid() } != 0 {
+        use std::os::unix::fs::PermissionsExt;
+        let removed = store.root.join("removed");
+        std::fs::set_permissions(&removed, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let refused = invoke(&["put", fixture.to_str().unwrap()]);
+        std::fs::set_permissions(&removed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(error(refused).contains("Permission denied"));
+        assert!(!job.exists());
+    }
+
     // A job recreated with the ID continues its revisions, so an edit or dispatch
     // prepared for the removed revision 1 cannot apply to the replacement.
     let recreated = invoke(&["put", fixture.to_str().unwrap()]);
