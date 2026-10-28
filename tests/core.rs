@@ -320,11 +320,23 @@ fn malformed_job_and_missing_directory_do_not_block_other_jobs() {
     let mut missing = job(store.root.join("missing-directory"), &["/bin/echo", "no"]);
     missing.id = "missing-directory".into();
     store.save(missing).unwrap();
-    assert_eq!(
-        runner::run(&store, "missing-directory").unwrap().status,
-        "failed"
+    let missing = runner::run(&store, "missing-directory").unwrap();
+    assert_eq!(missing.status, "failed");
+    let error = missing.error.unwrap();
+    assert!(
+        error.contains("working directory") && error.contains("does not exist"),
+        "{error}"
     );
-    assert_eq!(store.jobs().unwrap().jobs.len(), 2);
+    let file_cwd = store.root.join("not-a-directory");
+    fs::write(&file_cwd, b"file").unwrap();
+    let mut file_job = job(file_cwd, &["/bin/echo", "no"]);
+    file_job.id = "not-a-directory".into();
+    store.save(file_job).unwrap();
+    let file_run = runner::run(&store, "not-a-directory").unwrap();
+    assert_eq!(file_run.status, "failed");
+    let error = file_run.error.unwrap();
+    assert!(error.contains("is not a directory"), "{error}");
+    assert_eq!(store.jobs().unwrap().jobs.len(), 3);
 }
 
 #[test]

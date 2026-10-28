@@ -1,5 +1,5 @@
 use crate::model::Outcome;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::{
     collections::BTreeMap,
     fs::{File, OpenOptions},
@@ -244,7 +244,7 @@ fn execute_to(
     cmd.process_group(0);
     let child = cmd
         .spawn()
-        .with_context(|| format!("could not start {}", argv[0]))?;
+        .map_err(|error| explain_start(&argv[0], cwd, error))?;
     let mut group = ChildGroup {
         child,
         reaped: false,
@@ -324,4 +324,28 @@ fn execute_to(
         }
         thread::sleep(Duration::from_millis(10));
     }
+}
+
+/// `spawn` reports a missing working directory as a missing executable.
+/// Name the directory when that is what failed, and leave other launch
+/// errors attached to the executable.
+fn explain_start(argv0: &str, cwd: &Path, error: std::io::Error) -> anyhow::Error {
+    let problem = match std::fs::metadata(cwd) {
+        Ok(meta) if meta.is_dir() => None,
+        Ok(_) => Some("is not a directory"),
+        Err(io) if io.kind() == std::io::ErrorKind::NotFound => Some("does not exist"),
+        Err(_) => None,
+    };
+    if let Some(problem) = problem
+        && matches!(
+            error.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+        )
+    {
+        return anyhow::Error::new(error).context(format!(
+            "could not start {argv0}: working directory {} {problem}",
+            cwd.display()
+        ));
+    }
+    anyhow::Error::new(error).context(format!("could not start {argv0}"))
 }
