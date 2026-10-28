@@ -305,6 +305,16 @@ fn invalid_inputs_and_symlink_redirection_are_rejected() {
 }
 
 #[test]
+fn second_scheduler_names_the_owner() {
+    let (_temp, store) = store();
+    let _running = store.lock("service").unwrap();
+    let error = format!("{:#}", scheduler::serve(&store, true).unwrap_err());
+    assert!(
+        error.contains("another `vardr serve` already owns"),
+        "{error}"
+    );
+}
+#[test]
 fn malformed_job_and_missing_directory_do_not_block_other_jobs() {
     let (_temp, store) = store();
     let mut good = job(store.root.clone(), &["/bin/echo", "still-runs"]);

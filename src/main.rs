@@ -244,9 +244,13 @@ fn entry(cli: Cli) -> Result<()> {
         Commands::Show { id } => output(&store.job(&id)?)?,
         Commands::Put { file } => {
             let job: Job = if file.as_os_str() == "-" {
-                serde_json::from_slice(&stdin_json()?)?
+                serde_json::from_slice(&stdin_json()?).context("invalid job definition on stdin")?
             } else {
-                read_json(&file.canonicalize()?)?
+                let path = file
+                    .canonicalize()
+                    .with_context(|| format!("cannot read {}", file.display()))?;
+                read_json(&path)
+                    .with_context(|| format!("invalid job definition {}", file.display()))?
             };
             output(&store.save(job)?)?;
         }

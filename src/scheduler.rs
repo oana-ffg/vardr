@@ -2,7 +2,7 @@ use crate::{
     model::*,
     process::STOP,
     runner::{self, Workers},
-    store::{Store, write_json},
+    store::{self, Store, write_json},
     updates,
 };
 use anyhow::Result;
@@ -16,7 +16,16 @@ use std::{
 
 /// Returns true after an idle automatic update, so main restarts the new binary.
 pub fn serve(store: &Store, once: bool) -> Result<bool> {
-    let _service_lock = store.transaction("service")?;
+    let _service_lock = store.transaction("service").map_err(|error| {
+        if store::lock_contention(&error) {
+            error.context(format!(
+                "another `vardr serve` already owns {}; stop it first",
+                store.root.display()
+            ))
+        } else {
+            error
+        }
+    })?;
     let result = serve_loop(store, once);
     if let Err(error) = &result {
         // A bounded last-error record survives a failed startup under launchd.

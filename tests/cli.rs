@@ -37,7 +37,33 @@ fn cli_import_edit_run_and_structured_errors() {
     );
     let missing = invoke(&["show", "does-not-exist"]);
     assert!(!missing.status.success());
-    assert!(serde_json::from_slice::<Value>(&missing.stderr).unwrap()["error"].is_string());
+    let error = serde_json::from_slice::<Value>(&missing.stderr).unwrap()["error"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        error.contains("no job named does-not-exist") && error.contains("vardr list"),
+        "{error}"
+    );
+    let error_of = |output: std::process::Output| {
+        assert!(!output.status.success());
+        serde_json::from_slice::<Value>(&output.stderr).unwrap()["error"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let absent = temp.path().join("absent.json");
+    let error = error_of(invoke(&["put", absent.to_str().unwrap()]));
+    assert!(error.contains("absent.json"), "{error}");
+    std::fs::write(home.join("config.json"), b"{").unwrap();
+    let error = error_of(invoke(&["status"]));
+    assert!(error.contains("config.json"), "{error}");
+    std::fs::write(home.join("config.json"), br#"{"max_concurrency":0}"#).unwrap();
+    let error = error_of(invoke(&["status"]));
+    assert!(
+        error.contains("config.json") && error.contains("max_concurrency"),
+        "{error}"
+    );
 }
 
 fn t3_dispatch(lose_receipt: bool, gopass: bool) {

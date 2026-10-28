@@ -1,5 +1,5 @@
 use crate::model::*;
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
 use serde::{Serialize, de::DeserializeOwned};
 use std::{
@@ -121,11 +121,12 @@ impl Store {
     pub fn settings(&self) -> Result<Settings> {
         let p = self.root.join("config.json");
         let s: Settings = if p.exists() {
-            read_json(&p)?
+            read_json(&p).with_context(|| format!("invalid settings in {}", p.display()))?
         } else {
             Settings::default()
         };
-        s.validate()?;
+        s.validate()
+            .with_context(|| format!("invalid settings in {}", p.display()))?;
         Ok(s)
     }
     pub fn jobs(&self) -> Result<JobInventory> {
@@ -163,8 +164,13 @@ impl Store {
     }
     pub fn job(&self, id: &str) -> Result<Job> {
         let path = self.job_path(id)?;
-        ensure!(path.try_exists()?, "no job named {id}");
-        read_json(&path)
+        // `try_exists` leaves an unreadable file as an error. Treating it as missing
+        // would hide a permissions problem behind "no job named".
+        match path.try_exists() {
+            Ok(true) => read_json(&path),
+            Ok(false) => bail!("{}", missing_job(id)),
+            Err(error) => Err(error).with_context(|| format!("cannot read {}", path.display())),
+        }
     }
     /// Callers that write per-job files check this under the registry lock or the
     /// job's state lock. `remove` holds both while deleting, so a removed job's files
@@ -201,12 +207,13 @@ impl Store {
         let runs = self.root.join("runs").join(id);
         ensure!(
             path.try_exists()? || state.try_exists()? || runs.try_exists()?,
-            "no job named {id}"
+            "{}",
+            missing_job(id)
         );
         let exists = path.try_exists()?;
         // An expected revision only matches a definition; it cannot finish an
         // interrupted removal.
-        ensure!(exists || revision.is_none(), "no job named {id}");
+        ensure!(exists || revision.is_none(), "{}", missing_job(id));
         if exists {
             // Only the revision is needed, so a definition that no longer validates
             // can still be removed.
@@ -352,7 +359,15 @@ impl Store {
                 {
                     std::thread::sleep(std::time::Duration::from_millis(10))
                 }
-                Err(e) => return Err(e).with_context(|| format!("timed out acquiring {name}")),
+                Err(e) => {
+                    let contended = e.raw_os_error() == fs2::lock_contended_error().raw_os_error();
+                    let message = if contended {
+                        format!("timed out acquiring {name}")
+                    } else {
+                        format!("could not acquire {name}")
+                    };
+                    return Err(e).context(message);
+                }
             }
         }
     }
@@ -380,6 +395,18 @@ fn sync_parent(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn missing_job(id: &str) -> String {
+    format!("no job named {id}; `vardr list` shows the saved ones")
+}
+
+pub(crate) fn lock_contention(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        cause
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|io| io.raw_os_error() == fs2::lock_contended_error().raw_os_error())
+    })
+}
+
 pub fn reject_symlinks(path: &Path) -> Result<()> {
     // Canonicalize the caller's data root before using it; still refuse redirections
     // introduced under that root, including a symlink in a missing leaf's ancestors.
@@ -397,11 +424,13 @@ pub fn reject_symlinks(path: &Path) -> Result<()> {
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     reject_symlinks(path)?;
     let mut data = Vec::new();
-    File::open(path)?
+    File::open(path)
+        .with_context(|| format!("cannot read {}", path.display()))?
         .take(4 * 1024 * 1024 + 1)
-        .read_to_end(&mut data)?;
+        .read_to_end(&mut data)
+        .with_context(|| format!("cannot read {}", path.display()))?;
     ensure!(data.len() <= 4 * 1024 * 1024, "JSON file too large");
-    Ok(serde_json::from_slice(&data)?)
+    serde_json::from_slice(&data).with_context(|| format!("invalid JSON in {}", path.display()))
 }
 pub fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
     reject_symlinks(path)?;
@@ -411,6 +440,8 @@ pub fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
     serde_json::to_writer_pretty(&mut tmp, value)?;
     tmp.write_all(b"\n")?;
     tmp.as_file().sync_all()?;
-    tmp.persist(path).map_err(|e| e.error)?;
+    tmp.persist(path)
+        .map_err(|e| e.error)
+        .with_context(|| format!("cannot write {}", path.display()))?;
     sync_parent(path)
 }
