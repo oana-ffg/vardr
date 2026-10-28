@@ -163,6 +163,12 @@ fn runner_records_failures_and_investigates_once_per_cooldown() {
     let second = runner::run(&store, "test-job").unwrap();
     assert_eq!(second.status, "failed");
     assert_eq!(second.investigation.unwrap().status, "cooldown");
+    // The cooldown run has no investigation log; the previous one stays reachable.
+    assert!(
+        runner::logs(&store, "test-job", true)
+            .unwrap()
+            .contains("investigated")
+    );
 }
 #[test]
 fn command_investigator_receives_failure_prompt_on_stdin() {

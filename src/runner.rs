@@ -4,7 +4,7 @@ use crate::{
     process::STOP,
     store::{Store, reject_symlinks},
 };
-use anyhow::Result;
+use anyhow::{Context, Result, bail, ensure};
 use chrono::Utc;
 use std::{
     collections::BTreeMap,
@@ -194,17 +194,30 @@ pub(crate) fn run_job(store: &Store, job: Job, _lock: crate::store::Lock) -> Res
     Ok(record)
 }
 
+/// The newest run that has the requested log. Skipped records have no output, and
+/// cooldown or disabled investigations leave no investigation log, so the newest
+/// record alone would hide the last available evidence.
 pub fn logs(store: &Store, id: &str, investigation: bool) -> Result<String> {
-    let run = store
-        .runs(id)?
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("no runs for {id}"))?;
-    let path = store.run_dir(id, &run.id)?.join(if investigation {
+    let runs = store.runs(id)?;
+    ensure!(!runs.is_empty(), "no runs for {id}");
+    let name = if investigation {
         "investigation.log"
     } else {
         "output.log"
-    });
-    reject_symlinks(&path)?;
-    Ok(String::from_utf8_lossy(&fs::read(path)?).into_owned())
+    };
+    for run in runs {
+        let path = store.run_dir(id, &run.id)?.join(name);
+        reject_symlinks(&path)?;
+        match fs::read(&path) {
+            Ok(bytes) => return Ok(String::from_utf8_lossy(&bytes).into_owned()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("cannot read {}", path.display()));
+            }
+        }
+    }
+    if investigation {
+        bail!("no retained run of {id} has an investigation log")
+    }
+    bail!("no retained run of {id} has output")
 }
