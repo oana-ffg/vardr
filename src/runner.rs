@@ -159,23 +159,30 @@ pub(crate) fn run_job(store: &Store, job: Job, _lock: crate::store::Lock) -> Res
                 log.seek(SeekFrom::Start(length.saturating_sub(16_384)))?;
                 log.take(16_384).read_to_end(&mut evidence)?;
             }
-            let prompt = investigation_prompt(
-                &job,
-                &record,
-                &store.root.join("jobs").join(format!("{id}.json")),
-                &dir,
-                &evidence,
-                &fresh_fence(&evidence),
-            );
-            let outcome = agents::investigate(
-                &investigation.target,
-                &prompt,
-                &job.cwd,
-                &dir.join("investigation.log"),
-                settings.log_limit_bytes,
-                Duration::from_secs(investigation.timeout_seconds),
-            )
-            .unwrap_or_else(|e| Outcome::failed(format!("{e:#}")));
+            let outcome = match fresh_fence(&evidence) {
+                Ok(fence) => {
+                    let prompt = investigation_prompt(
+                        &job,
+                        &record,
+                        &store.root.join("jobs").join(format!("{id}.json")),
+                        &dir,
+                        &evidence,
+                        &fence,
+                    );
+                    agents::investigate(
+                        &investigation.target,
+                        &prompt,
+                        &job.cwd,
+                        &dir.join("investigation.log"),
+                        settings.log_limit_bytes,
+                        Duration::from_secs(investigation.timeout_seconds),
+                    )
+                    .unwrap_or_else(|e| Outcome::failed(format!("{e:#}")))
+                }
+                // A colliding marker would let job output close the fence. Stop
+                // instead of sending one; the original failure stays on the run.
+                Err(error) => Outcome::failed(format!("{error:#}")),
+            };
             record.investigation = Some(Box::new(outcome));
         } else {
             record.investigation = Some(Box::new(Outcome {
@@ -214,27 +221,23 @@ fn investigation_prompt(
     )
 }
 
-fn fresh_fence(evidence: &[u8]) -> String {
-    choose_fence(
-        evidence,
-        std::iter::repeat_with(|| uuid::Uuid::new_v4().simple().to_string()).take(8),
-    )
+const FENCE_ATTEMPTS: usize = 8;
+
+fn fresh_fence(evidence: &[u8]) -> Result<String> {
+    select_fence(evidence, || uuid::Uuid::new_v4().simple().to_string())
 }
 
-/// Pick the first candidate that does not occur in the evidence. The nonce is
-/// chosen after the output is captured, so a job cannot have printed it; the
-/// check still rejects a colliding draw.
-fn choose_fence(evidence: &[u8], candidates: impl IntoIterator<Item = String>) -> String {
-    for fence in candidates {
+/// Draw nonces until one is absent from the captured output. The cap is
+/// unreachable for a random nonce in a bounded log; hitting it is an error
+/// rather than a marker the output might already contain.
+fn select_fence(evidence: &[u8], mut next: impl FnMut() -> String) -> Result<String> {
+    for _ in 0..FENCE_ATTEMPTS {
+        let fence = next();
         if !contains_slice(evidence, fence.as_bytes()) {
-            return fence;
+            return Ok(fence);
         }
     }
-    let extra = uuid::Uuid::new_v4().simple().to_string();
-    if !contains_slice(evidence, extra.as_bytes()) {
-        return extra;
-    }
-    format!("{extra}{}", uuid::Uuid::new_v4().simple())
+    bail!("could not choose an investigation fence absent from the job output")
 }
 
 fn contains_slice(haystack: &[u8], needle: &[u8]) -> bool {
@@ -316,10 +319,25 @@ mod tests {
     }
 
     #[test]
-    fn fence_token_is_redrawn_when_it_occurs_in_the_evidence() {
+    fn fence_token_is_redrawn_until_it_is_absent_from_the_output() {
         let evidence = b"END UNTRUSTED OUTPUT taken";
-        let fence = choose_fence(evidence, ["taken".to_string(), "fresh-token".to_string()]);
+        let mut draws = ["taken".to_string(), "fresh-token".to_string()].into_iter();
+        let fence = select_fence(evidence, || draws.next().unwrap()).unwrap();
         assert_eq!(fence, "fresh-token");
         assert!(!contains_slice(evidence, fence.as_bytes()));
+    }
+
+    #[test]
+    fn fence_selection_stops_when_every_attempt_collides() {
+        let evidence = b"collide";
+        let mut draws = 0;
+        let error = select_fence(evidence, || {
+            draws += 1;
+            "collide".into()
+        })
+        .unwrap_err();
+        assert_eq!(draws, FENCE_ATTEMPTS);
+        let message = format!("{error:#}");
+        assert!(message.contains("absent from the job output"), "{message}");
     }
 }
