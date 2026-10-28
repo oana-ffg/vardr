@@ -103,6 +103,7 @@ The launchd view is read-only. Vardr-managed jobs on the selected Mac support ed
 vardr list --json
 vardr show hello
 vardr schedule hello --daily 09:00 --timezone Europe/Copenhagen
+vardr schedule hello --daily 09:00 --timezone Europe/Copenhagen --weekdays 1,2,3,4,5
 vardr schedule hello --every 3600
 vardr pause hello
 vardr resume hello
