@@ -340,9 +340,15 @@ fn cli_remove_deletes_a_job_with_its_state_and_history() {
     );
 
     // A removal interrupted after deleting the definition is finished by a retry.
+    // A dashboard removal, which names a revision, refuses and leaves it alone.
     store
         .save_state("remove-test", &vardr::model::RuntimeState::default())
         .unwrap();
+    assert!(
+        format!("{:#}", store.remove("remove-test", Some(1)).unwrap_err())
+            .contains("no job named remove-test")
+    );
+    assert!(state.exists());
     assert!(invoke(&["remove", "remove-test"]).status.success());
     assert!(!state.exists());
 
