@@ -141,7 +141,10 @@ pub fn request(
         .iter()
         .find(|host| host.id == id)
         .context("unknown remote host")?;
-    let mutating = matches!(operation, crate::bridge::Operation::Save { .. });
+    let mutating = matches!(
+        operation,
+        crate::bridge::Operation::Save { .. } | crate::bridge::Operation::Remove { .. }
+    );
     let input = serde_json::to_string(&crate::bridge::Request {
         protocol: 1,
         operation,

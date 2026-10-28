@@ -271,6 +271,20 @@ fn bridge_preserves_command_environment_and_rejects_conflicting_remote_edits() {
         request(json!({"type":"logs","id":"environment-test"}))["result"]["text"],
         "value with spaces and 'quotes'"
     );
+    assert!(
+        request(json!({"type":"remove","id":"environment-test","revision":1}))["error"]
+            .as_str()
+            .unwrap()
+            .contains("changed since")
+    );
+    assert_eq!(
+        request(json!({"type":"remove","id":"environment-test","revision":2}))["result"],
+        json!({"removed":"environment-test"})
+    );
+    assert_eq!(
+        request(json!({"type":"snapshot"}))["result"]["jobs"],
+        json!([])
+    );
 }
 
 #[test]

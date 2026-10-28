@@ -16,6 +16,7 @@ pub enum Operation {
     Snapshot,
     Save { job: Box<Job> },
     Logs { id: String },
+    Remove { id: String, revision: u64 },
 }
 pub fn respond(store: &Store, request: Request) -> Value {
     let result = (|| -> Result<Value> {
@@ -24,6 +25,10 @@ pub fn respond(store: &Store, request: Request) -> Value {
             Operation::Snapshot => ui::snapshot(store),
             Operation::Save { job } => Ok(serde_json::to_value(store.save(*job)?)?),
             Operation::Logs { id } => Ok(json!({"text":runner::logs(store, &id, false)?})),
+            Operation::Remove { id, revision } => {
+                store.remove(&id, Some(revision))?;
+                Ok(json!({"removed":id}))
+            }
         }
     })();
     match result {

@@ -145,6 +145,26 @@ fn dashboard_requires_private_entry_and_rejects_duplicate_runs() {
         .json()
         .unwrap();
     assert!(local["jobs"].as_array().unwrap().is_empty());
+    let removable = json!({"id":"ui-remove","name":"UI remove","purpose":"Delete through the dashboard","cwd":temp.path(),"target":{"type":"command","argv":["/bin/echo","bye"]},"schedule":{"type":"manual"}});
+    assert!(post("/api/job", removable).status().is_success());
+    let stale = post("/api/remove", json!({"id":"ui-remove","revision":0}));
+    assert_eq!(stale.status(), 400);
+    assert!(
+        stale.json::<Value>().unwrap()["error"]
+            .as_str()
+            .unwrap()
+            .contains("changed since")
+    );
+    assert_eq!(
+        post("/api/remove", json!({"id":"ui-remove","revision":1}))
+            .json::<Value>()
+            .unwrap(),
+        json!({"removed":"ui-remove"})
+    );
+    assert_eq!(
+        post("/api/remove", json!({"id":"ui-remove","revision":1})).status(),
+        400
+    );
     assert!(post("/api/job", job).status().is_success());
     assert!(
         post("/api/run", json!({"id":"ui-test"}))
@@ -152,6 +172,14 @@ fn dashboard_requires_private_entry_and_rejects_duplicate_runs() {
             .is_success()
     );
     assert_eq!(post("/api/run", json!({"id":"ui-test"})).status(), 400);
+    let running = post("/api/remove", json!({"id":"ui-test","revision":1}));
+    assert_eq!(running.status(), 400);
+    assert!(
+        running.json::<Value>().unwrap()["error"]
+            .as_str()
+            .unwrap()
+            .contains("ui-test is running")
+    );
     let start = Instant::now();
     unsafe {
         libc::kill(dashboard.0.id() as i32, libc::SIGHUP);

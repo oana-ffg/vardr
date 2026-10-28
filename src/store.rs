@@ -185,11 +185,12 @@ impl Store {
         })
     }
     /// Delete a job with its schedule state and run history; refused while it runs.
-    /// Also finishes an interrupted removal whose definition is already gone. Two
+    /// With `revision`, also refused unless the definition is still that revision, so
+    /// a dashboard never deletes a job changed since it was displayed. Also finishes an interrupted removal whose definition is already gone. Two
     /// things stay: the last revision, in `removed/`, and the lock files, since a
     /// waiter may still hold one open and unlinking it would let a recreated job with
     /// the same ID take a second, independent lock.
-    pub fn remove(&self, id: &str) -> Result<()> {
+    pub fn remove(&self, id: &str, revision: Option<u64>) -> Result<()> {
         let path = self.job_path(id)?;
         let _registry = self.transaction("registry")?;
         let _run = self
@@ -202,10 +203,14 @@ impl Store {
             path.try_exists()? || state.try_exists()? || runs.try_exists()?,
             "no job named {id}"
         );
-        if path.try_exists()? {
+        let exists = path.try_exists()?;
+        // An expected revision only matches a definition; it cannot finish an
+        // interrupted removal.
+        ensure!(exists || revision.is_none(), "no job named {id}");
+        if exists {
             // Only the revision is needed, so a definition that no longer validates
             // can still be removed.
-            let revision = read_json::<Removed>(&path)
+            let current = read_json::<Removed>(&path)
                 .with_context(|| {
                     format!(
                         "cannot read the revision of {id}; fix or delete {} by hand",
@@ -213,7 +218,11 @@ impl Store {
                     )
                 })?
                 .revision;
-            let revision = revision.max(self.removed_revision(id)?);
+            ensure!(
+                revision.is_none_or(|expected| expected == current),
+                "job changed since it was read; refresh before deleting it"
+            );
+            let revision = current.max(self.removed_revision(id)?);
             // The record must survive a crash that the deletions below survive,
             // including the entry of a newly created `removed/` in the data root.
             let removed = self.root.join("removed");
