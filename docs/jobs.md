@@ -52,7 +52,7 @@ Dispatch is intentionally not retried: T3's thread-launch operation has no idemp
 
 ## Failure investigation
 
-`investigation` contains `enabled`, `target`, `cooldown_seconds` (default 3600), and `timeout_seconds` (default 600). Any target above can be used. Only explicitly enabled investigations start an agent. The prompt requests a diagnosis and proposed fix, with no retries, edits, schedule changes, or messages.
+`investigation` contains `enabled`, `target`, `cooldown_seconds` (default 3600), and `timeout_seconds` (default 600). Any target above can be used. Agent targets receive the investigation prompt as usual; a command target receives it on stdin. Only explicitly enabled investigations start an agent. The prompt requests a diagnosis and proposed fix, with no retries, edits, schedule changes, or messages.
 
 One investigation is attempted per failed local run, subject to the per-job cooldown. Attempts are recorded before launch. The investigator has its own bounded output and result. Investigation failure never recursively launches another investigator, and investigation success never clears the original job's failure.
 

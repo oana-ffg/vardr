@@ -103,6 +103,36 @@ fn revisions_prevent_lost_updates() {
 }
 
 #[test]
+fn concurrent_field_edits_serialize_and_no_op_edits_keep_the_baseline() {
+    let (_temp, store) = store();
+    let saved = store.save(job(store.root.clone(), &["/bin/true"])).unwrap();
+    let pausers: Vec<_> = (0..8)
+        .map(|_| {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                store.update("test-job", |job| {
+                    job.enabled = false;
+                    Ok(())
+                })
+            })
+        })
+        .collect();
+    for pauser in pausers {
+        assert!(!pauser.join().unwrap().unwrap().enabled);
+    }
+    let paused = store.job("test-job").unwrap();
+    assert_eq!(paused.revision, saved.revision + 1);
+    let again = store
+        .update("test-job", |job| {
+            job.enabled = false;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(again.revision, paused.revision);
+    assert_eq!(again.updated_at, paused.updated_at);
+}
+
+#[test]
 fn scheduled_dispatch_rechecks_pause_revision_and_manual_overlap() {
     let (_temp, store) = store();
     let mut j = store
@@ -149,20 +179,96 @@ fn runner_records_failures_and_investigates_once_per_cooldown() {
     store.save(j).unwrap();
     let first = runner::run(&store, "test-job").unwrap();
     assert_eq!(first.status, "failed");
-    assert_eq!(first.investigation.unwrap().status, "succeeded");
+    assert_eq!(first.investigation.as_ref().unwrap().status, "succeeded");
     assert!(
         runner::logs(&store, "test-job", false)
             .unwrap()
             .contains("failure-evidence")
     );
+    let latest_investigation = runner::logs(&store, "test-job", true).unwrap();
+    assert!(latest_investigation.contains("investigated"));
     assert!(
-        runner::logs(&store, "test-job", true)
-            .unwrap()
-            .contains("investigated")
+        !latest_investigation.starts_with("Showing run"),
+        "{latest_investigation}"
     );
     let second = runner::run(&store, "test-job").unwrap();
     assert_eq!(second.status, "failed");
     assert_eq!(second.investigation.unwrap().status, "cooldown");
+    // The cooldown run has no investigation log; the previous one stays reachable.
+    let fallback = runner::logs(&store, "test-job", true).unwrap();
+    assert!(fallback.contains("investigated"));
+    assert!(
+        fallback.starts_with(&format!(
+            "Showing run {} from {} (latest run had no investigation)\n",
+            first.id,
+            first.started_at.to_rfc3339()
+        )),
+        "{fallback}"
+    );
+}
+#[test]
+fn logs_name_the_older_run_when_the_latest_has_no_output() {
+    let (_temp, store) = store();
+    store
+        .save(job(store.root.clone(), &["/bin/echo", "kept-output"]))
+        .unwrap();
+    let first = runner::run(&store, "test-job").unwrap();
+    assert_eq!(
+        runner::logs(&store, "test-job", false).unwrap(),
+        "kept-output\n"
+    );
+    let skipped = runner::run_scheduled(&store, "test-job", 0)
+        .unwrap()
+        .expect("a revision mismatch is recorded as a skipped run");
+    assert_eq!(skipped.status, "skipped");
+    let text = runner::logs(&store, "test-job", false).unwrap();
+    assert!(
+        text.starts_with(&format!(
+            "Showing run {} from {} (latest run had no output)\n",
+            first.id,
+            first.started_at.to_rfc3339()
+        )),
+        "{text}"
+    );
+    assert!(text.contains("kept-output"));
+}
+#[test]
+fn command_investigator_receives_failure_prompt_on_stdin() {
+    let (_temp, store) = store();
+    let mut j = job(
+        store.root.clone(),
+        &["/bin/sh", "-c", "echo failure-evidence; exit 7"],
+    );
+    j.investigation = Some(Investigation {
+        enabled: true,
+        target: Target::Command {
+            env: Default::default(),
+            argv: vec!["/bin/cat".into()],
+        },
+        cooldown_seconds: 0,
+        timeout_seconds: 10,
+    });
+    store.save(j).unwrap();
+    let run = runner::run(&store, "test-job").unwrap();
+    assert_eq!(run.status, "failed");
+    assert_eq!(run.investigation.unwrap().status, "succeeded");
+    let prompt = runner::logs(&store, "test-job", true).unwrap();
+    assert!(prompt.contains("Investigate this failed automation"));
+    assert!(prompt.contains("failure-evidence"));
+}
+#[test]
+fn command_job_prompt_stays_off_stdin() {
+    let (_temp, store) = store();
+    let mut j = job(store.root.clone(), &["/bin/cat"]);
+    j.prompt = "should-not-reach-stdin".into();
+    store.save(j).unwrap();
+    let run = runner::run(&store, "test-job").unwrap();
+    assert_eq!(run.status, "succeeded");
+    assert!(
+        !runner::logs(&store, "test-job", false)
+            .unwrap()
+            .contains("should-not-reach-stdin")
+    );
 }
 #[test]
 fn timeout_terminates_descendants_and_retains_original_result() {
@@ -267,6 +373,16 @@ fn invalid_inputs_and_symlink_redirection_are_rejected() {
 }
 
 #[test]
+fn second_scheduler_names_the_owner() {
+    let (_temp, store) = store();
+    let _running = store.lock("service").unwrap();
+    let error = format!("{:#}", scheduler::serve(&store, true).unwrap_err());
+    assert!(
+        error.contains("another `vardr serve` already owns"),
+        "{error}"
+    );
+}
+#[test]
 fn malformed_job_and_missing_directory_do_not_block_other_jobs() {
     let (_temp, store) = store();
     let mut good = job(store.root.clone(), &["/bin/echo", "still-runs"]);
@@ -282,11 +398,23 @@ fn malformed_job_and_missing_directory_do_not_block_other_jobs() {
     let mut missing = job(store.root.join("missing-directory"), &["/bin/echo", "no"]);
     missing.id = "missing-directory".into();
     store.save(missing).unwrap();
-    assert_eq!(
-        runner::run(&store, "missing-directory").unwrap().status,
-        "failed"
+    let missing = runner::run(&store, "missing-directory").unwrap();
+    assert_eq!(missing.status, "failed");
+    let error = missing.error.unwrap();
+    assert!(
+        error.contains("working directory") && error.contains("does not exist"),
+        "{error}"
     );
-    assert_eq!(store.jobs().unwrap().jobs.len(), 2);
+    let file_cwd = store.root.join("not-a-directory");
+    fs::write(&file_cwd, b"file").unwrap();
+    let mut file_job = job(file_cwd, &["/bin/echo", "no"]);
+    file_job.id = "not-a-directory".into();
+    store.save(file_job).unwrap();
+    let file_run = runner::run(&store, "not-a-directory").unwrap();
+    assert_eq!(file_run.status, "failed");
+    let error = file_run.error.unwrap();
+    assert!(error.contains("is not a directory"), "{error}");
+    assert_eq!(store.jobs().unwrap().jobs.len(), 3);
 }
 
 #[test]

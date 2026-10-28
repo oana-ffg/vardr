@@ -61,6 +61,9 @@ enum Commands {
         daily: Option<String>,
         #[arg(long, requires = "daily")]
         timezone: Option<String>,
+        /// Comma-separated ISO weekdays (Monday=1 … Sunday=7). Omit to keep the current list. `all` runs every day.
+        #[arg(long, requires = "daily")]
+        weekdays: Option<String>,
         #[arg(long, conflicts_with_all=["daily","manual"])]
         every: Option<u64>,
         #[arg(long, conflicts_with_all=["daily","every"])]
@@ -244,9 +247,13 @@ fn entry(cli: Cli) -> Result<()> {
         Commands::Show { id } => output(&store.job(&id)?)?,
         Commands::Put { file } => {
             let job: Job = if file.as_os_str() == "-" {
-                serde_json::from_slice(&stdin_json()?)?
+                serde_json::from_slice(&stdin_json()?).context("invalid job definition on stdin")?
             } else {
-                read_json(&file.canonicalize()?)?
+                let path = file
+                    .canonicalize()
+                    .with_context(|| format!("cannot read {}", file.display()))?;
+                read_json(&path)
+                    .with_context(|| format!("invalid job definition {}", file.display()))?
             };
             output(&store.save(job)?)?;
         }
@@ -254,16 +261,14 @@ fn entry(cli: Cli) -> Result<()> {
             store.remove(&id, None)?;
             output(&json!({"removed":id}))?;
         }
-        Commands::Pause { id } => {
-            let mut job = store.job(&id)?;
+        Commands::Pause { id } => output(&store.update(&id, |job| {
             job.enabled = false;
-            output(&store.save(job)?)?;
-        }
-        Commands::Resume { id } => {
-            let mut job = store.job(&id)?;
+            Ok(())
+        })?)?,
+        Commands::Resume { id } => output(&store.update(&id, |job| {
             job.enabled = true;
-            output(&store.save(job)?)?;
-        }
+            Ok(())
+        })?)?,
         Commands::Run { id } => {
             let run = runner::run(&store, &id)?;
             output(&run)?;
@@ -286,32 +291,41 @@ fn entry(cli: Cli) -> Result<()> {
             id,
             daily,
             timezone,
+            weekdays,
             every,
             manual,
         } => {
-            let mut job = store.job(&id)?;
-            job.schedule = if let Some(time) = daily {
-                Schedule::Daily {
-                    time,
-                    timezone: timezone.context("--daily requires --timezone")?,
-                    weekdays: Vec::new(),
-                }
-            } else if let Some(seconds) = every {
-                Schedule::Interval { seconds }
-            } else {
-                ensure!(manual, "choose --daily, --every, or --manual");
-                Schedule::Manual
-            };
-            output(&store.save(job)?)?;
+            output(&store.update(&id, |job| {
+                job.schedule = if let Some(time) = daily {
+                    // Changing the time must not turn a weekday schedule into an every-day one.
+                    let days = match weekdays.as_deref() {
+                        Some(value) => parse_weekdays(value)?,
+                        None => match &job.schedule {
+                            Schedule::Daily { weekdays, .. } => weekdays.clone(),
+                            _ => Vec::new(),
+                        },
+                    };
+                    Schedule::Daily {
+                        time,
+                        timezone: timezone.context("--daily requires --timezone")?,
+                        weekdays: days,
+                    }
+                } else if let Some(seconds) = every {
+                    Schedule::Interval { seconds }
+                } else {
+                    ensure!(manual, "choose --daily, --every, or --manual");
+                    Schedule::Manual
+                };
+                Ok(())
+            })?)?;
         }
-        Commands::Investigate { id, enabled } => {
-            let mut job = store.job(&id)?;
+        Commands::Investigate { id, enabled } => output(&store.update(&id, |job| {
             job.investigation
                 .as_mut()
                 .context("configure investigation.target with `put` first")?
                 .enabled = enabled;
-            output(&store.save(job)?)?;
-        }
+            Ok(())
+        })?)?,
         Commands::Serve { once } => {
             let executable = std::env::current_exe()?;
             if scheduler::serve(&store, once)? {
@@ -430,6 +444,36 @@ fn entry(cli: Cli) -> Result<()> {
         Commands::Verify { .. } | Commands::Migrate => unreachable!(),
     }
     Ok(())
+}
+
+fn parse_weekdays(value: &str) -> Result<Vec<u32>> {
+    let value = value.trim();
+    if value.eq_ignore_ascii_case("all") {
+        return Ok(Vec::new());
+    }
+    let mut days = Vec::new();
+    for part in value.split(',') {
+        let part = part.trim();
+        ensure!(
+            !part.is_empty(),
+            "weekdays must be 1–7 (Monday=1) separated by commas, or all"
+        );
+        let day: u32 = part
+            .parse()
+            .with_context(|| format!("invalid weekday {part:?}; use 1–7 (Monday=1) or all"))?;
+        ensure!(
+            (1..=7).contains(&day),
+            "weekdays must be 1 (Monday) to 7 (Sunday)"
+        );
+        if !days.contains(&day) {
+            days.push(day);
+        }
+    }
+    ensure!(
+        !days.is_empty(),
+        "weekdays must be 1–7 (Monday=1) separated by commas, or all"
+    );
+    Ok(days)
 }
 
 fn stdin_json() -> Result<Vec<u8>> {

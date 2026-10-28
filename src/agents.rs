@@ -23,9 +23,38 @@ pub fn execute(
     limit: u64,
     timeout: Duration,
 ) -> Result<Outcome> {
+    dispatch(target, prompt, false, cwd, log, limit, timeout)
+}
+
+/// Run an investigator. A command target reads the failure prompt on stdin;
+/// agent targets behave as in `execute`. Ordinary command jobs stay on
+/// `/dev/null`, so a stored prompt does not become their input.
+pub(crate) fn investigate(
+    target: &Target,
+    prompt: &str,
+    cwd: &Path,
+    log: &Path,
+    limit: u64,
+    timeout: Duration,
+) -> Result<Outcome> {
+    dispatch(target, prompt, true, cwd, log, limit, timeout)
+}
+
+fn dispatch(
+    target: &Target,
+    prompt: &str,
+    pipe_command_stdin: bool,
+    cwd: &Path,
+    log: &Path,
+    limit: u64,
+    timeout: Duration,
+) -> Result<Outcome> {
     match target {
         Target::Command { argv, env } => {
-            process::execute_with_env(argv, cwd, None, env, log, limit, timeout)
+            let input = pipe_command_stdin
+                .then_some(prompt)
+                .filter(|prompt| !prompt.is_empty());
+            process::execute_with_env(argv, cwd, input, env, log, limit, timeout)
         }
         Target::Codex { model } => {
             let mut argv = vec![

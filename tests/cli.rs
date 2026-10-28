@@ -37,7 +37,33 @@ fn cli_import_edit_run_and_structured_errors() {
     );
     let missing = invoke(&["show", "does-not-exist"]);
     assert!(!missing.status.success());
-    assert!(serde_json::from_slice::<Value>(&missing.stderr).unwrap()["error"].is_string());
+    let error = serde_json::from_slice::<Value>(&missing.stderr).unwrap()["error"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert!(
+        error.contains("no job named does-not-exist") && error.contains("vardr list"),
+        "{error}"
+    );
+    let error_of = |output: std::process::Output| {
+        assert!(!output.status.success());
+        serde_json::from_slice::<Value>(&output.stderr).unwrap()["error"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    let absent = temp.path().join("absent.json");
+    let error = error_of(invoke(&["put", absent.to_str().unwrap()]));
+    assert!(error.contains("absent.json"), "{error}");
+    std::fs::write(home.join("config.json"), b"{").unwrap();
+    let error = error_of(invoke(&["status"]));
+    assert!(error.contains("config.json"), "{error}");
+    std::fs::write(home.join("config.json"), br#"{"max_concurrency":0}"#).unwrap();
+    let error = error_of(invoke(&["status"]));
+    assert!(
+        error.contains("config.json") && error.contains("max_concurrency"),
+        "{error}"
+    );
 }
 
 fn t3_dispatch(lose_receipt: bool, gopass: bool) {
@@ -388,4 +414,94 @@ fn cli_remove_deletes_a_job_with_its_state_and_history() {
         .unwrap();
     assert_eq!(skipped.status, "skipped");
     assert_eq!(skipped.job_revision, 2);
+}
+
+#[test]
+fn rescheduling_a_daily_job_keeps_or_sets_weekdays() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("data");
+    let fixture = temp.path().join("job.json");
+    std::fs::write(
+        &fixture,
+        serde_json::to_vec(&json!({
+            "id": "weekdays",
+            "name": "Weekdays",
+            "purpose": "Keep weekdays across a time change",
+            "cwd": temp.path(),
+            "target": {"type": "command", "argv": ["/bin/true"]},
+            "schedule": {
+                "type": "daily",
+                "time": "09:00",
+                "timezone": "Europe/Copenhagen",
+                "weekdays": [1, 2, 3, 4, 5]
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let invoke = |args: &[&str]| {
+        let output = Command::new(bin())
+            .arg("--home")
+            .arg(&home)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        serde_json::from_slice::<Value>(&output.stdout).unwrap()
+    };
+    invoke(&["put", fixture.to_str().unwrap()]);
+    let moved = invoke(&[
+        "schedule",
+        "weekdays",
+        "--daily",
+        "10:00",
+        "--timezone",
+        "Europe/Copenhagen",
+    ]);
+    assert_eq!(moved["schedule"]["time"], "10:00");
+    assert_eq!(moved["schedule"]["weekdays"], json!([1, 2, 3, 4, 5]));
+    let weekend = invoke(&[
+        "schedule",
+        "weekdays",
+        "--daily",
+        "11:00",
+        "--timezone",
+        "Europe/Copenhagen",
+        "--weekdays",
+        "6, 7",
+    ]);
+    assert_eq!(weekend["schedule"]["weekdays"], json!([6, 7]));
+    let every_day = invoke(&[
+        "schedule",
+        "weekdays",
+        "--daily",
+        "12:00",
+        "--timezone",
+        "Europe/Copenhagen",
+        "--weekdays",
+        "all",
+    ]);
+    assert_eq!(every_day["schedule"]["time"], "12:00");
+    assert_eq!(every_day["schedule"]["weekdays"], json!([]));
+    let rejected = Command::new(bin())
+        .arg("--home")
+        .arg(&home)
+        .args([
+            "schedule",
+            "weekdays",
+            "--daily",
+            "13:00",
+            "--timezone",
+            "Europe/Copenhagen",
+            "--weekdays",
+            "9",
+        ])
+        .output()
+        .unwrap();
+    assert!(!rejected.status.success());
+    let error = String::from_utf8(rejected.stderr).unwrap();
+    assert!(error.contains("weekdays"), "{error}");
+    let kept = invoke(&["show", "weekdays"]);
+    assert_eq!(kept["schedule"]["time"], "12:00");
+    assert_eq!(kept["schedule"]["weekdays"], json!([]));
 }
