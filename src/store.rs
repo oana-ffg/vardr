@@ -255,9 +255,33 @@ impl Store {
         }
         Ok(())
     }
-    pub fn save(&self, mut job: Job) -> Result<Job> {
+    pub fn save(&self, job: Job) -> Result<Job> {
         job.validate()?;
         let _lock = self.transaction("registry")?;
+        self.save_locked(job)
+    }
+    /// Apply a field edit (pause, resume, reschedule, investigate) to the current
+    /// definition while holding the registry lock. Concurrent edits serialize
+    /// instead of failing as revision conflicts, and an edit that changes nothing
+    /// keeps the revision and the scheduling baseline (`updated_at`).
+    ///
+    /// `edit` must not call back into the store. The registry lock is not reentrant.
+    pub fn update(&self, id: &str, edit: impl FnOnce(&mut Job) -> Result<()>) -> Result<Job> {
+        let _lock = self.transaction("registry")?;
+        let current = self.job(id)?;
+        let mut job = current.clone();
+        edit(&mut job)?;
+        ensure!(
+            job.id == current.id,
+            "field edits cannot change the automation ID"
+        );
+        if serde_json::to_value(&job)? == serde_json::to_value(&current)? {
+            return Ok(current);
+        }
+        job.validate()?;
+        self.save_locked(job)
+    }
+    fn save_locked(&self, mut job: Job) -> Result<Job> {
         let path = self.root.join("jobs").join(format!("{}.json", job.id));
         let previous: Option<Job> = if path.try_exists()? {
             Some(read_json(&path)?)

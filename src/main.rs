@@ -258,16 +258,14 @@ fn entry(cli: Cli) -> Result<()> {
             store.remove(&id, None)?;
             output(&json!({"removed":id}))?;
         }
-        Commands::Pause { id } => {
-            let mut job = store.job(&id)?;
+        Commands::Pause { id } => output(&store.update(&id, |job| {
             job.enabled = false;
-            output(&store.save(job)?)?;
-        }
-        Commands::Resume { id } => {
-            let mut job = store.job(&id)?;
+            Ok(())
+        })?)?,
+        Commands::Resume { id } => output(&store.update(&id, |job| {
             job.enabled = true;
-            output(&store.save(job)?)?;
-        }
+            Ok(())
+        })?)?,
         Commands::Run { id } => {
             let run = runner::run(&store, &id)?;
             output(&run)?;
@@ -293,8 +291,7 @@ fn entry(cli: Cli) -> Result<()> {
             every,
             manual,
         } => {
-            let mut job = store.job(&id)?;
-            job.schedule = if let Some(time) = daily {
+            let schedule = if let Some(time) = daily {
                 Schedule::Daily {
                     time,
                     timezone: timezone.context("--daily requires --timezone")?,
@@ -306,16 +303,18 @@ fn entry(cli: Cli) -> Result<()> {
                 ensure!(manual, "choose --daily, --every, or --manual");
                 Schedule::Manual
             };
-            output(&store.save(job)?)?;
+            output(&store.update(&id, |job| {
+                job.schedule = schedule;
+                Ok(())
+            })?)?;
         }
-        Commands::Investigate { id, enabled } => {
-            let mut job = store.job(&id)?;
+        Commands::Investigate { id, enabled } => output(&store.update(&id, |job| {
             job.investigation
                 .as_mut()
                 .context("configure investigation.target with `put` first")?
                 .enabled = enabled;
-            output(&store.save(job)?)?;
-        }
+            Ok(())
+        })?)?,
         Commands::Serve { once } => {
             let executable = std::env::current_exe()?;
             if scheduler::serve(&store, once)? {

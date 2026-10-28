@@ -103,6 +103,36 @@ fn revisions_prevent_lost_updates() {
 }
 
 #[test]
+fn concurrent_field_edits_serialize_and_no_op_edits_keep_the_baseline() {
+    let (_temp, store) = store();
+    let saved = store.save(job(store.root.clone(), &["/bin/true"])).unwrap();
+    let pausers: Vec<_> = (0..8)
+        .map(|_| {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                store.update("test-job", |job| {
+                    job.enabled = false;
+                    Ok(())
+                })
+            })
+        })
+        .collect();
+    for pauser in pausers {
+        assert!(!pauser.join().unwrap().unwrap().enabled);
+    }
+    let paused = store.job("test-job").unwrap();
+    assert_eq!(paused.revision, saved.revision + 1);
+    let again = store
+        .update("test-job", |job| {
+            job.enabled = false;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(again.revision, paused.revision);
+    assert_eq!(again.updated_at, paused.updated_at);
+}
+
+#[test]
 fn scheduled_dispatch_rechecks_pause_revision_and_manual_overlap() {
     let (_temp, store) = store();
     let mut j = store
