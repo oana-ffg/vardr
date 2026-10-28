@@ -217,7 +217,9 @@ fn logs_name_the_older_run_when_the_latest_has_no_output() {
         runner::logs(&store, "test-job", false).unwrap(),
         "kept-output\n"
     );
-    let skipped = runner::run_scheduled(&store, "test-job", 0).unwrap();
+    let skipped = runner::run_scheduled(&store, "test-job", 0)
+        .unwrap()
+        .expect("a revision mismatch is recorded as a skipped run");
     assert_eq!(skipped.status, "skipped");
     let text = runner::logs(&store, "test-job", false).unwrap();
     assert!(
