@@ -179,26 +179,56 @@ fn runner_records_failures_and_investigates_once_per_cooldown() {
     store.save(j).unwrap();
     let first = runner::run(&store, "test-job").unwrap();
     assert_eq!(first.status, "failed");
-    assert_eq!(first.investigation.unwrap().status, "succeeded");
+    assert_eq!(first.investigation.as_ref().unwrap().status, "succeeded");
     assert!(
         runner::logs(&store, "test-job", false)
             .unwrap()
             .contains("failure-evidence")
     );
+    let latest_investigation = runner::logs(&store, "test-job", true).unwrap();
+    assert!(latest_investigation.contains("investigated"));
     assert!(
-        runner::logs(&store, "test-job", true)
-            .unwrap()
-            .contains("investigated")
+        !latest_investigation.starts_with("Showing run"),
+        "{latest_investigation}"
     );
     let second = runner::run(&store, "test-job").unwrap();
     assert_eq!(second.status, "failed");
     assert_eq!(second.investigation.unwrap().status, "cooldown");
     // The cooldown run has no investigation log; the previous one stays reachable.
+    let fallback = runner::logs(&store, "test-job", true).unwrap();
+    assert!(fallback.contains("investigated"));
     assert!(
-        runner::logs(&store, "test-job", true)
-            .unwrap()
-            .contains("investigated")
+        fallback.starts_with(&format!(
+            "Showing run {} from {} (latest run had no investigation)\n",
+            first.id,
+            first.started_at.to_rfc3339()
+        )),
+        "{fallback}"
     );
+}
+#[test]
+fn logs_name_the_older_run_when_the_latest_has_no_output() {
+    let (_temp, store) = store();
+    store
+        .save(job(store.root.clone(), &["/bin/echo", "kept-output"]))
+        .unwrap();
+    let first = runner::run(&store, "test-job").unwrap();
+    assert_eq!(
+        runner::logs(&store, "test-job", false).unwrap(),
+        "kept-output\n"
+    );
+    let skipped = runner::run_scheduled(&store, "test-job", 0).unwrap();
+    assert_eq!(skipped.status, "skipped");
+    let text = runner::logs(&store, "test-job", false).unwrap();
+    assert!(
+        text.starts_with(&format!(
+            "Showing run {} from {} (latest run had no output)\n",
+            first.id,
+            first.started_at.to_rfc3339()
+        )),
+        "{text}"
+    );
+    assert!(text.contains("kept-output"));
 }
 #[test]
 fn command_investigator_receives_failure_prompt_on_stdin() {

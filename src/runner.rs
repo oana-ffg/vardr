@@ -246,7 +246,9 @@ fn contains_slice(haystack: &[u8], needle: &[u8]) -> bool {
 
 /// The newest run that has the requested log. Skipped records have no output, and
 /// cooldown or disabled investigations leave no investigation log, so the newest
-/// record alone would hide the last available evidence.
+/// record alone would hide the last available evidence. An older run is prefixed
+/// with its id and start time. The CLI, local dashboard, and remote bridge all
+/// return this string.
 pub fn logs(store: &Store, id: &str, investigation: bool) -> Result<String> {
     let runs = store.runs(id)?;
     ensure!(!runs.is_empty(), "no runs for {id}");
@@ -255,11 +257,27 @@ pub fn logs(store: &Store, id: &str, investigation: bool) -> Result<String> {
     } else {
         "output.log"
     };
-    for run in runs {
+    let latest = runs[0].id.clone();
+    for run in &runs {
         let path = store.run_dir(id, &run.id)?.join(name);
         reject_symlinks(&path)?;
         match fs::read(&path) {
-            Ok(bytes) => return Ok(String::from_utf8_lossy(&bytes).into_owned()),
+            Ok(bytes) => {
+                let body = String::from_utf8_lossy(&bytes).into_owned();
+                if run.id == latest {
+                    return Ok(body);
+                }
+                let missing = if investigation {
+                    "investigation"
+                } else {
+                    "output"
+                };
+                return Ok(format!(
+                    "Showing run {} from {} (latest run had no {missing})\n{body}",
+                    run.id,
+                    run.started_at.to_rfc3339()
+                ));
+            }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => {
                 return Err(error).with_context(|| format!("cannot read {}", path.display()));
