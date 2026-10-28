@@ -171,7 +171,7 @@ pub(crate) fn run_job(store: &Store, job: Job, _lock: crate::store::Lock) -> Res
                 dir.join("output.log").display(),
                 String::from_utf8_lossy(&evidence)
             );
-            let outcome = agents::execute(
+            let outcome = agents::investigate(
                 &investigation.target,
                 &prompt,
                 &job.cwd,

@@ -165,6 +165,44 @@ fn runner_records_failures_and_investigates_once_per_cooldown() {
     assert_eq!(second.investigation.unwrap().status, "cooldown");
 }
 #[test]
+fn command_investigator_receives_failure_prompt_on_stdin() {
+    let (_temp, store) = store();
+    let mut j = job(
+        store.root.clone(),
+        &["/bin/sh", "-c", "echo failure-evidence; exit 7"],
+    );
+    j.investigation = Some(Investigation {
+        enabled: true,
+        target: Target::Command {
+            env: Default::default(),
+            argv: vec!["/bin/cat".into()],
+        },
+        cooldown_seconds: 0,
+        timeout_seconds: 10,
+    });
+    store.save(j).unwrap();
+    let run = runner::run(&store, "test-job").unwrap();
+    assert_eq!(run.status, "failed");
+    assert_eq!(run.investigation.unwrap().status, "succeeded");
+    let prompt = runner::logs(&store, "test-job", true).unwrap();
+    assert!(prompt.contains("Investigate this failed automation"));
+    assert!(prompt.contains("failure-evidence"));
+}
+#[test]
+fn command_job_prompt_stays_off_stdin() {
+    let (_temp, store) = store();
+    let mut j = job(store.root.clone(), &["/bin/cat"]);
+    j.prompt = "should-not-reach-stdin".into();
+    store.save(j).unwrap();
+    let run = runner::run(&store, "test-job").unwrap();
+    assert_eq!(run.status, "succeeded");
+    assert!(
+        !runner::logs(&store, "test-job", false)
+            .unwrap()
+            .contains("should-not-reach-stdin")
+    );
+}
+#[test]
 fn timeout_terminates_descendants_and_retains_original_result() {
     let (_temp, store) = store();
     let mut j = job(store.root.clone(), &["/bin/sh", "-c", "sleep 60 & wait"]);
