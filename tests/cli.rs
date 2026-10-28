@@ -272,3 +272,100 @@ fn bridge_preserves_command_environment_and_rejects_conflicting_remote_edits() {
         "value with spaces and 'quotes'"
     );
 }
+
+#[test]
+fn cli_remove_deletes_a_job_with_its_state_and_history() {
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().join("data");
+    let fixture = temp.path().join("job.json");
+    std::fs::write(&fixture,serde_json::to_vec(&json!({"id":"remove-test","name":"Remove test","purpose":"Verify job removal","cwd":temp.path(),"target":{"type":"command","argv":["/bin/echo","removed"]},"schedule":{"type":"manual"}})).unwrap()).unwrap();
+    let invoke = |args: &[&str]| {
+        Command::new(bin())
+            .arg("--home")
+            .arg(&home)
+            .arg("--json")
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let error = |output: std::process::Output| {
+        assert!(!output.status.success());
+        serde_json::from_slice::<Value>(&output.stderr).unwrap()["error"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
+    assert!(invoke(&["put", fixture.to_str().unwrap()]).status.success());
+    assert!(invoke(&["run", "remove-test"]).status.success());
+    let store = vardr::store::Store::open(home.canonicalize().unwrap()).unwrap();
+    store
+        .save_state("remove-test", &vardr::model::RuntimeState::default())
+        .unwrap();
+    let job = store.root.join("jobs/remove-test.json");
+    let state = store.root.join("state/remove-test.json");
+    let runs = store.root.join("runs/remove-test");
+    assert!(job.exists() && state.exists() && runs.exists());
+
+    let running = store.lock("run-remove-test").unwrap();
+    assert!(error(invoke(&["remove", "remove-test"])).contains("remove-test is running"));
+    assert!(job.exists() && state.exists() && runs.exists());
+    drop(running);
+
+    let removed = invoke(&["remove", "remove-test"]);
+    assert!(removed.status.success());
+    assert_eq!(
+        serde_json::from_slice::<Value>(&removed.stdout).unwrap(),
+        json!({"removed":"remove-test"})
+    );
+    assert!(!job.exists() && !state.exists() && !runs.exists());
+    assert!(error(invoke(&["show", "remove-test"])).contains("no job named remove-test"));
+    assert!(error(invoke(&["remove", "remove-test"])).contains("no job named remove-test"));
+    assert_eq!(
+        serde_json::from_slice::<Value>(&invoke(&["list"]).stdout).unwrap()["jobs"],
+        json!([])
+    );
+
+    // A removal interrupted after deleting the definition is finished by a retry.
+    store
+        .save_state("remove-test", &vardr::model::RuntimeState::default())
+        .unwrap();
+    assert!(invoke(&["remove", "remove-test"]).status.success());
+    assert!(!state.exists());
+
+    // A dispatch reserved before the removal starts nothing and records nothing.
+    assert!(
+        vardr::runner::run_scheduled(&store, "remove-test", 1)
+            .unwrap()
+            .is_none()
+    );
+    assert!(!runs.exists());
+
+    // An unreadable revision record refuses recreation instead of restarting at 1.
+    // Root bypasses permissions, so the check only holds for ordinary users.
+    if unsafe { libc::geteuid() } != 0 {
+        use std::os::unix::fs::PermissionsExt;
+        let removed = store.root.join("removed");
+        std::fs::set_permissions(&removed, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let refused = invoke(&["put", fixture.to_str().unwrap()]);
+        std::fs::set_permissions(&removed, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(error(refused).contains("Permission denied"));
+        assert!(!job.exists());
+    }
+
+    // A job recreated with the ID continues its revisions, so an edit or dispatch
+    // prepared for the removed revision 1 cannot apply to the replacement.
+    let recreated = invoke(&["put", fixture.to_str().unwrap()]);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&recreated.stdout).unwrap()["revision"],
+        2
+    );
+    let mut stale: Value = serde_json::from_slice(&std::fs::read(&fixture).unwrap()).unwrap();
+    stale["revision"] = json!(1);
+    std::fs::write(&fixture, serde_json::to_vec(&stale).unwrap()).unwrap();
+    assert!(error(invoke(&["put", fixture.to_str().unwrap()])).contains("job changed"));
+    let skipped = vardr::runner::run_scheduled(&store, "remove-test", 1)
+        .unwrap()
+        .unwrap();
+    assert_eq!(skipped.status, "skipped");
+    assert_eq!(skipped.job_revision, 2);
+}

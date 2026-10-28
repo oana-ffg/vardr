@@ -33,6 +33,10 @@ enum Commands {
     Put {
         file: PathBuf,
     },
+    /// Delete a job with its schedule state and run history. Refused while it runs.
+    Remove {
+        id: String,
+    },
     Pause {
         id: String,
     },
@@ -245,6 +249,10 @@ fn entry(cli: Cli) -> Result<()> {
                 read_json(&file.canonicalize()?)?
             };
             output(&store.save(job)?)?;
+        }
+        Commands::Remove { id } => {
+            store.remove(&id)?;
+            output(&json!({"removed":id}))?;
         }
         Commands::Pause { id } => {
             let mut job = store.job(&id)?;

@@ -15,12 +15,13 @@ use std::{
     time::Duration,
 };
 
+/// A worker's result is `None` when its job was removed before it started.
 #[derive(Default)]
 pub(crate) struct Workers {
-    pub tasks: BTreeMap<String, JoinHandle<Result<Run>>>,
+    pub tasks: BTreeMap<String, JoinHandle<Result<Option<Run>>>>,
 }
 impl Workers {
-    pub fn reap(&mut self) -> Vec<(String, Result<Run>)> {
+    pub fn reap(&mut self) -> Vec<(String, Result<Option<Run>>)> {
         let ids: Vec<_> = self
             .tasks
             .iter()
@@ -34,14 +35,14 @@ impl Workers {
             })
             .collect()
     }
-    pub fn finish(&mut self) -> Vec<(String, Result<Run>)> {
+    pub fn finish(&mut self) -> Vec<(String, Result<Option<Run>>)> {
         std::mem::take(&mut self.tasks)
             .into_iter()
             .map(|(id, t)| (id, join(t)))
             .collect()
     }
 }
-fn join(thread: JoinHandle<Result<Run>>) -> Result<Run> {
+fn join(thread: JoinHandle<Result<Option<Run>>>) -> Result<Option<Run>> {
     thread
         .join()
         .map_err(|_| anyhow::anyhow!("runner thread panicked"))?
@@ -61,8 +62,12 @@ pub fn run(store: &Store, id: &str) -> Result<Run> {
     run_job(store, job, lock)
 }
 
-pub fn run_scheduled(store: &Store, id: &str, revision: u64) -> Result<Run> {
+pub fn run_scheduled(store: &Store, id: &str, revision: u64) -> Result<Option<Run>> {
     let registry = store.transaction("registry")?;
+    if !store.has_job(id)? {
+        // Removed after its reservation; its history is gone, so record nothing.
+        return Ok(None);
+    }
     let job = store.job(id)?;
     let lock = store.lock(&format!("run-{id}"));
     let reason = if !job.enabled || job.revision != revision {
@@ -78,13 +83,13 @@ pub fn run_scheduled(store: &Store, id: &str, revision: u64) -> Result<Run> {
         record.error = Some(reason.into());
         record.finished_at = Some(Utc::now());
         store.record(&record)?;
-        return Ok(record);
+        return Ok(Some(record));
     }
     let lock = lock?;
     // Acquiring the per-job lock while holding the registry lock establishes the
     // dispatch boundary. A subsequent Pause does not stop an already-started run.
     drop(registry);
-    run_job(store, job, lock)
+    run_job(store, job, lock).map(Some)
 }
 
 fn new_record(job: &Job) -> Run {

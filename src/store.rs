@@ -157,15 +157,93 @@ impl Store {
         inventory.jobs.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(inventory)
     }
-    pub fn job(&self, id: &str) -> Result<Job> {
+    fn job_path(&self, id: &str) -> Result<PathBuf> {
         validate_id(id)?;
-        read_json(&self.root.join("jobs").join(format!("{id}.json")))
+        Ok(self.root.join("jobs").join(format!("{id}.json")))
+    }
+    pub fn job(&self, id: &str) -> Result<Job> {
+        let path = self.job_path(id)?;
+        ensure!(path.try_exists()?, "no job named {id}");
+        read_json(&path)
+    }
+    /// Callers that write per-job files check this under the registry lock or the
+    /// job's state lock. `remove` holds both while deleting, so a removed job's files
+    /// are never recreated.
+    pub fn has_job(&self, id: &str) -> Result<bool> {
+        Ok(self.job_path(id)?.try_exists()?)
+    }
+    /// The last revision of a removed job. A job recreated with its ID continues
+    /// from there, so a stale edit or pending dispatch of the removed job, which
+    /// carries its revision, never matches the replacement.
+    fn removed_revision(&self, id: &str) -> Result<u64> {
+        let path = self.root.join("removed").join(format!("{id}.json"));
+        // An unreadable record must fail rather than count as absent.
+        Ok(if path.try_exists()? {
+            read_json::<Removed>(&path)?.revision
+        } else {
+            0
+        })
+    }
+    /// Delete a job with its schedule state and run history; refused while it runs.
+    /// Also finishes an interrupted removal whose definition is already gone. Two
+    /// things stay: the last revision, in `removed/`, and the lock files, since a
+    /// waiter may still hold one open and unlinking it would let a recreated job with
+    /// the same ID take a second, independent lock.
+    pub fn remove(&self, id: &str) -> Result<()> {
+        let path = self.job_path(id)?;
+        let _registry = self.transaction("registry")?;
+        let _run = self
+            .lock(&format!("run-{id}"))
+            .with_context(|| format!("{id} is running; remove it after the run finishes"))?;
+        let _state = self.transaction(&format!("state-{id}"))?;
+        let state = self.root.join("state").join(format!("{id}.json"));
+        let runs = self.root.join("runs").join(id);
+        ensure!(
+            path.try_exists()? || state.try_exists()? || runs.try_exists()?,
+            "no job named {id}"
+        );
+        if path.try_exists()? {
+            // Only the revision is needed, so a definition that no longer validates
+            // can still be removed.
+            let revision = read_json::<Removed>(&path)
+                .with_context(|| {
+                    format!(
+                        "cannot read the revision of {id}; fix or delete {} by hand",
+                        path.display()
+                    )
+                })?
+                .revision;
+            let revision = revision.max(self.removed_revision(id)?);
+            // The record must survive a crash that the deletions below survive,
+            // including the entry of a newly created `removed/` in the data root.
+            let removed = self.root.join("removed");
+            reject_symlinks(&removed)?;
+            fs::create_dir_all(&removed)?;
+            sync_parent(&removed)?;
+            write_json(&removed.join(format!("{id}.json")), &Removed { revision })?;
+        }
+        // The definition goes first: without it nothing schedules the job, whereas
+        // a job without its state could replay occurrences it already ran.
+        for file in [&path, &state] {
+            reject_symlinks(file)?;
+            match fs::remove_file(file) {
+                Ok(()) => sync_parent(file)?,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                Err(e) => return Err(e.into()),
+            }
+        }
+        reject_symlinks(&runs)?;
+        if runs.try_exists()? {
+            fs::remove_dir_all(&runs)?;
+            sync_parent(&runs)?;
+        }
+        Ok(())
     }
     pub fn save(&self, mut job: Job) -> Result<Job> {
         job.validate()?;
         let _lock = self.transaction("registry")?;
         let path = self.root.join("jobs").join(format!("{}.json", job.id));
-        let previous: Option<Job> = if path.exists() {
+        let previous: Option<Job> = if path.try_exists()? {
             Some(read_json(&path)?)
         } else {
             None
@@ -174,7 +252,10 @@ impl Store {
             job.revision == previous.as_ref().map_or(0, |x| x.revision),
             "job changed since it was read; fetch it again before saving"
         );
-        job.revision += 1;
+        job.revision = match &previous {
+            Some(previous) => previous.revision,
+            None => self.removed_revision(&job.id)?,
+        } + 1;
         job.updated_at = Some(Utc::now());
         // The scheduler uses updated_at as a floor after a definition change. This avoids
         // a second state-file write, and prevents stale cursors from replaying old work.
@@ -279,6 +360,17 @@ impl Store {
     }
 }
 
+/// What `Store::remove` keeps of a job: enough to never reuse its revisions.
+#[derive(serde::Deserialize, Serialize)]
+struct Removed {
+    revision: u64,
+}
+
+fn sync_parent(path: &Path) -> Result<()> {
+    File::open(path.parent().context("missing parent directory")?)?.sync_all()?;
+    Ok(())
+}
+
 pub fn reject_symlinks(path: &Path) -> Result<()> {
     // Canonicalize the caller's data root before using it; still refuse redirections
     // introduced under that root, including a symlink in a missing leaf's ancestors.
@@ -311,6 +403,5 @@ pub fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
     tmp.write_all(b"\n")?;
     tmp.as_file().sync_all()?;
     tmp.persist(path).map_err(|e| e.error)?;
-    File::open(parent)?.sync_all()?;
-    Ok(())
+    sync_parent(path)
 }
