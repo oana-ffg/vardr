@@ -271,6 +271,20 @@ fn bridge_preserves_command_environment_and_rejects_conflicting_remote_edits() {
         request(json!({"type":"logs","id":"environment-test"}))["result"]["text"],
         "value with spaces and 'quotes'"
     );
+    assert!(
+        request(json!({"type":"remove","id":"environment-test","revision":1}))["error"]
+            .as_str()
+            .unwrap()
+            .contains("changed since")
+    );
+    assert_eq!(
+        request(json!({"type":"remove","id":"environment-test","revision":2}))["result"],
+        json!({"removed":"environment-test"})
+    );
+    assert_eq!(
+        request(json!({"type":"snapshot"}))["result"]["jobs"],
+        json!([])
+    );
 }
 
 #[test]
@@ -326,9 +340,15 @@ fn cli_remove_deletes_a_job_with_its_state_and_history() {
     );
 
     // A removal interrupted after deleting the definition is finished by a retry.
+    // A dashboard removal, which names a revision, refuses and leaves it alone.
     store
         .save_state("remove-test", &vardr::model::RuntimeState::default())
         .unwrap();
+    assert!(
+        format!("{:#}", store.remove("remove-test", Some(1)).unwrap_err())
+            .contains("no job named remove-test")
+    );
+    assert!(state.exists());
     assert!(invoke(&["remove", "remove-test"]).status.success());
     assert!(!state.exists());
 

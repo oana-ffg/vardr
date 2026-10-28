@@ -229,6 +229,25 @@ fn handle(store: &Store, request: &mut Request, workers: &mut Workers) -> Result
             )
         };
     }
+    if path == "/api/remove" {
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Remove {
+            id: String,
+            revision: u64,
+        }
+        let Remove { id, revision } = serde_json::from_slice(&bytes)?;
+        return if host == "local" {
+            store.remove(&id, Some(revision))?;
+            Ok(json!({"removed":id}))
+        } else {
+            crate::hosts::request(
+                store,
+                host,
+                crate::bridge::Operation::Remove { id, revision },
+            )
+        };
+    }
     if path == "/api/run" {
         ensure!(
             host == "local",

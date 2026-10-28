@@ -30,7 +30,7 @@ Vardr is a lightweight Rust CLI and background runner with an optional native ma
 ## What works
 
 - Required names and purpose descriptions, project/machine labels, and a working directory for each automation.
-- Manual, interval, and daily schedules with IANA timezones and optional weekdays. Pause, resume, reschedule, and run now through the CLI or dashboard.
+- Manual, interval, and daily schedules with IANA timezones and optional weekdays. Pause, resume, reschedule, delete, and run now through the CLI or dashboard.
 - Ordinary commands, Codex CLI, Claude Code, and T3 Code launches. Existing Codex/T3 schedules remain independent; Vardr does not modify their scheduler files.
 - Durable run records, bounded streaming logs, timeouts that terminate process groups, per-job overlap prevention, and configurable scheduler concurrency (one by default).
 - Optional **spawn an agent to investigate failures**, with a separate result/log and a per-job cooldown. Investigations diagnose; they do not automatically repair or retry jobs. The original failure stays a failure.
@@ -87,7 +87,7 @@ vardr service install
 
 ## Existing launchd jobs and connected Macs
 
-Select a Mac at the top of the app to view and edit its Vardr jobs, or inspect its existing launchd jobs. Remote schedule edits, pause/resume, investigator settings, and output use bounded SSH requests to that Mac’s Vardr CLI. Run now is available through the app or CLI on the target Mac. The native Scheduler menu controls the Mac running the app.
+Select a Mac at the top of the app to view and edit its Vardr jobs, or inspect its existing launchd jobs. Remote schedule edits, pause/resume, deletion, investigator settings, and output use bounded SSH requests to that Mac’s Vardr CLI. Run now is available through the app or CLI on the target Mac. The native Scheduler menu controls the Mac running the app.
 
 The app’s **Existing launchd jobs** section reads user LaunchAgents, global LaunchAgents, and LaunchDaemons. Apple OS services are excluded. Select a Mac and press **Refresh launchd** to take a new snapshot. An unreadable definition or unavailable host is shown as an error, not an empty healthy inventory.
 

@@ -251,7 +251,7 @@ fn entry(cli: Cli) -> Result<()> {
             output(&store.save(job)?)?;
         }
         Commands::Remove { id } => {
-            store.remove(&id)?;
+            store.remove(&id, None)?;
             output(&json!({"removed":id}))?;
         }
         Commands::Pause { id } => {
