@@ -2,7 +2,7 @@
 
 `vardr put FILE.json` validates the whole definition before saving. `vardr show ID` returns the exact saved definition, including the revision required to update it. Unknown fields are rejected.
 
-`vardr remove ID` deletes the definition with its schedule state and run history. It is refused while the job is running, and cannot be undone; use `pause` to stop a job while keeping its history.
+`vardr remove ID` deletes the definition with its schedule state and run history. It is refused while the job is running, and cannot be undone; use `pause` to stop a job while keeping its history. A job later created with the same ID continues the removed job's revision numbers, so an edit or scheduled run prepared for the removed job is rejected instead of applying to the new one.
 
 Required fields:
 

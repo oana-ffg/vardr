@@ -339,4 +339,21 @@ fn cli_remove_deletes_a_job_with_its_state_and_history() {
             .is_none()
     );
     assert!(!runs.exists());
+
+    // A job recreated with the ID continues its revisions, so an edit or dispatch
+    // prepared for the removed revision 1 cannot apply to the replacement.
+    let recreated = invoke(&["put", fixture.to_str().unwrap()]);
+    assert_eq!(
+        serde_json::from_slice::<Value>(&recreated.stdout).unwrap()["revision"],
+        2
+    );
+    let mut stale: Value = serde_json::from_slice(&std::fs::read(&fixture).unwrap()).unwrap();
+    stale["revision"] = json!(1);
+    std::fs::write(&fixture, serde_json::to_vec(&stale).unwrap()).unwrap();
+    assert!(error(invoke(&["put", fixture.to_str().unwrap()])).contains("job changed"));
+    let skipped = vardr::runner::run_scheduled(&store, "remove-test", 1)
+        .unwrap()
+        .unwrap();
+    assert_eq!(skipped.status, "skipped");
+    assert_eq!(skipped.job_revision, 2);
 }
