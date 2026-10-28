@@ -101,12 +101,13 @@ fn serve_loop(store: &Store, once: bool) -> Result<bool> {
         if once {
             for (id, result) in workers.finish() {
                 match result {
-                    Ok(run)
+                    Ok(None) => {}
+                    Ok(Some(run))
                         if matches!(
                             run.status.as_str(),
                             "succeeded" | "dispatched" | "skipped"
                         ) => {}
-                    Ok(run) => {
+                    Ok(Some(run)) => {
                         errors.insert(id, format!("automation {}", run.status));
                     }
                     Err(e) => {
@@ -155,6 +156,9 @@ fn dispatch_due(store: &Store, workers: &mut Workers) -> Result<BTreeMap<String,
     {
         let result = (|| -> Result<Option<chrono::DateTime<Utc>>> {
             let _state_lock = store.transaction(&format!("state-{}", job.id))?;
+            if !store.has_job(&job.id)? {
+                return Ok(None);
+            }
             let mut state = store.state(&job.id)?;
             if let Some(due) = due_by(&job, &state, now, now)? {
                 if !job.catch_up && (now - due).num_seconds() > 60 {
@@ -179,16 +183,24 @@ fn dispatch_due(store: &Store, workers: &mut Workers) -> Result<BTreeMap<String,
         if workers.tasks.len() >= settings.max_concurrency {
             break;
         }
-        let reservation = (|| -> Result<()> {
+        let reservation = (|| -> Result<bool> {
             let _state_lock = store.transaction(&format!("state-{id}"))?;
+            if !store.has_job(&id)? {
+                return Ok(false);
+            }
             let mut state = store.state(&id)?;
             // Persist intent first. Crashes never replay a possibly side-effecting run.
             state.watermark = Some(due);
-            store.save_state(&id, &state)
+            store.save_state(&id, &state)?;
+            Ok(true)
         })();
-        if let Err(e) = reservation {
-            errors.insert(format!("job:{id}"), format!("{e:#}"));
-            continue;
+        match reservation {
+            Ok(true) => (),
+            Ok(false) => continue,
+            Err(e) => {
+                errors.insert(format!("job:{id}"), format!("{e:#}"));
+                continue;
+            }
         }
         let local = store.clone();
         workers.tasks.insert(

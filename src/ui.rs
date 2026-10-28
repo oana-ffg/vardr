@@ -240,9 +240,11 @@ fn handle(store: &Store, request: &mut Request, workers: &mut Workers) -> Result
             .and_then(Value::as_str)
             .context("job ID required")?
             .to_string();
+        // Lock before reading, as `runner::run` does, so a concurrent `remove` cannot
+        // delete the job between the read and the run.
+        let lock = store.lock(&format!("run-{id}"))?;
         let job = store.job(&id)?;
         job.validate()?;
-        let lock = store.lock(&format!("run-{id}"))?;
         ensure!(
             !workers.tasks.contains_key(&id),
             "this job's previous invocation is still completing"
@@ -250,7 +252,7 @@ fn handle(store: &Store, request: &mut Request, workers: &mut Workers) -> Result
         let local = store.clone();
         workers.tasks.insert(
             id,
-            std::thread::spawn(move || runner::run_job(&local, job, lock)),
+            std::thread::spawn(move || runner::run_job(&local, job, lock).map(Some)),
         );
         return Ok(json!({"accepted":true}));
     }

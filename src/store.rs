@@ -157,9 +157,55 @@ impl Store {
         inventory.jobs.sort_by(|a, b| a.id.cmp(&b.id));
         Ok(inventory)
     }
-    pub fn job(&self, id: &str) -> Result<Job> {
+    fn job_path(&self, id: &str) -> Result<PathBuf> {
         validate_id(id)?;
-        read_json(&self.root.join("jobs").join(format!("{id}.json")))
+        Ok(self.root.join("jobs").join(format!("{id}.json")))
+    }
+    pub fn job(&self, id: &str) -> Result<Job> {
+        let path = self.job_path(id)?;
+        ensure!(path.exists(), "no job named {id}");
+        read_json(&path)
+    }
+    /// Callers that write per-job files check this under the registry lock or the
+    /// job's state lock. `remove` holds both while deleting, so a removed job's files
+    /// are never recreated.
+    pub fn has_job(&self, id: &str) -> Result<bool> {
+        Ok(self.job_path(id)?.exists())
+    }
+    /// Delete a job with its schedule state and run history; refused while it runs.
+    /// Also finishes an interrupted removal whose definition is already gone. Lock
+    /// files stay: a waiter may still hold one open, and unlinking it would let a
+    /// recreated job with the same ID take a second, independent lock.
+    pub fn remove(&self, id: &str) -> Result<()> {
+        let path = self.job_path(id)?;
+        let _registry = self.transaction("registry")?;
+        let _run = self
+            .lock(&format!("run-{id}"))
+            .with_context(|| format!("{id} is running; remove it after the run finishes"))?;
+        let _state = self.transaction(&format!("state-{id}"))?;
+        let state = self.root.join("state").join(format!("{id}.json"));
+        let runs = self.root.join("runs").join(id);
+        ensure!(
+            path.exists() || state.exists() || runs.exists(),
+            "no job named {id}"
+        );
+        // The definition goes first: without it nothing schedules the job, whereas
+        // a job without its state could replay occurrences it already ran.
+        for file in [&path, &state] {
+            reject_symlinks(file)?;
+            match fs::remove_file(file) {
+                Ok(()) => {
+                    File::open(file.parent().context("missing parent directory")?)?.sync_all()?
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                Err(e) => return Err(e.into()),
+            }
+        }
+        reject_symlinks(&runs)?;
+        if runs.exists() {
+            fs::remove_dir_all(&runs)?;
+        }
+        Ok(())
     }
     pub fn save(&self, mut job: Job) -> Result<Job> {
         job.validate()?;

@@ -106,6 +106,7 @@ vardr schedule hello --daily 09:00 --timezone Europe/Copenhagen
 vardr schedule hello --every 3600
 vardr pause hello
 vardr resume hello
+vardr remove hello
 vardr history hello
 vardr logs hello
 vardr logs hello --investigation

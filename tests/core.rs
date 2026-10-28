@@ -114,6 +114,7 @@ fn scheduled_dispatch_rechecks_pause_revision_and_manual_overlap() {
     assert_eq!(
         runner::run_scheduled(&store, &j.id, old_revision)
             .unwrap()
+            .unwrap()
             .status,
         "skipped"
     );
@@ -123,6 +124,7 @@ fn scheduled_dispatch_rechecks_pause_revision_and_manual_overlap() {
     let _manual = store.lock("run-test-job").unwrap();
     assert_eq!(
         runner::run_scheduled(&store, &j.id, j.revision)
+            .unwrap()
             .unwrap()
             .status,
         "skipped"
