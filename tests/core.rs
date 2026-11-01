@@ -451,3 +451,60 @@ fn detached_descendant_cannot_hold_pipes_or_stdin_open() {
     assert_eq!(outcome.status, "succeeded");
     assert!(start.elapsed() < Duration::from_secs(3));
 }
+
+#[test]
+fn skipped_dispatches_obey_retention_without_pruning_active_runs() {
+    let (_temp, store) = store();
+    let mut settings = store.settings().unwrap();
+    settings.retained_runs = 3;
+    write_json(&store.root.join("config.json"), &settings).unwrap();
+    let job = store.save(job(store.root.clone(), &["/bin/true"])).unwrap();
+    // A still-active manual invocation must survive pruning of overlapping slots.
+    let mut active = runner::run(&store, &job.id).unwrap();
+    active.status = "running".into();
+    active.finished_at = None;
+    store.record(&active).unwrap();
+    let _manual = store.lock("run-test-job").unwrap();
+    for n in 0..40 {
+        let revision = if n % 2 == 0 { job.revision } else { 0 };
+        let skipped = runner::run_scheduled(&store, &job.id, revision)
+            .unwrap()
+            .unwrap();
+        assert_eq!(skipped.status, "skipped");
+    }
+    let runs = store.runs(&job.id).unwrap();
+    let finished = runs.iter().filter(|r| r.finished_at.is_some()).count();
+    eprintln!(
+        "40 skipped dispatches, keep=3: finished={finished}, active={}",
+        runs.len() - finished
+    );
+    assert_eq!(finished, 3);
+    assert!(
+        runs.iter()
+            .any(|r| r.id == active.id && r.status == "running")
+    );
+}
+
+#[test]
+fn skipped_dispatch_pruning_preserves_an_active_investigation() {
+    let (_temp, store) = store();
+    let mut settings = store.settings().unwrap();
+    settings.retained_runs = 1;
+    write_json(&store.root.join("config.json"), &settings).unwrap();
+    let job = store.save(job(store.root.clone(), &["/bin/true"])).unwrap();
+    let mut investigating = runner::run(&store, &job.id).unwrap();
+    investigating.status = "failed".into();
+    investigating.investigation = Some(Box::new(Outcome {
+        status: "running".into(),
+        error: None,
+        remote: None,
+    }));
+    store.record(&investigating).unwrap();
+    let _manual = store.lock("run-test-job").unwrap();
+    for _ in 0..4 {
+        runner::run_scheduled(&store, &job.id, job.revision).unwrap();
+    }
+    let runs = store.runs(&job.id).unwrap();
+    assert_eq!(runs.len(), 2);
+    assert!(runs.iter().any(|r| r.id == investigating.id));
+}

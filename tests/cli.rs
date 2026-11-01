@@ -505,3 +505,78 @@ fn rescheduling_a_daily_job_keeps_or_sets_weekdays() {
     assert_eq!(kept["schedule"]["time"], "12:00");
     assert_eq!(kept["schedule"]["weekdays"], json!([]));
 }
+
+#[test]
+fn running_scheduler_observes_cli_schedule_edits_after_warming_its_cache() {
+    use std::time::{Duration, Instant};
+    use vardr::{
+        model::Settings,
+        store::{Store, write_json},
+    };
+    struct Scheduler(std::process::Child);
+    impl Drop for Scheduler {
+        fn drop(&mut self) {
+            unsafe {
+                libc::kill(self.0.id() as i32, libc::SIGTERM);
+            }
+            self.0.wait().unwrap();
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().canonicalize().unwrap().join("data");
+    let store = Store::open(home.clone()).unwrap();
+    let mut settings = Settings::default();
+    settings.updates.automatic = false;
+    write_json(&home.join("config.json"), &settings).unwrap();
+    let fixture = temp.path().join("job.json");
+    std::fs::write(&fixture, serde_json::to_vec(&json!({
+        "id":"schedule-edit", "name":"Schedule edit", "purpose":"Reload CLI edits in a running scheduler",
+        "cwd":temp.path(), "target":{"type":"command","argv":["/bin/echo","reloaded"]},
+        "schedule":{"type":"interval","seconds":3600}
+    })).unwrap()).unwrap();
+    let invoke = |args: &[&str]| {
+        Command::new(bin())
+            .arg("--home")
+            .arg(&home)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    assert!(invoke(&["put", fixture.to_str().unwrap()]).status.success());
+    let _scheduler = Scheduler(
+        Command::new(bin())
+            .arg("--home")
+            .arg(&home)
+            .arg("serve")
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !home.join("service.json").exists() {
+        assert!(Instant::now() < deadline, "scheduler did not start");
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(store.runs("schedule-edit").unwrap().is_empty());
+    assert!(
+        invoke(&["schedule", "schedule-edit", "--every", "10"])
+            .status
+            .success()
+    );
+    loop {
+        let runs = store.runs("schedule-edit").unwrap();
+        if runs.first().is_some_and(|r| r.status == "succeeded") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "scheduler did not run the edited schedule"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert_eq!(store.runs("schedule-edit").unwrap().len(), 1);
+    assert!(
+        String::from_utf8(invoke(&["logs", "schedule-edit"]).stdout)
+            .unwrap()
+            .contains("reloaded")
+    );
+}

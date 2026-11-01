@@ -2,7 +2,7 @@
 //! pattern in Ratatoskr Skill Sync (MIT, copyright 2026 Oana Goge).
 use crate::{
     model::parse_time,
-    store::{Store, read_json, write_json},
+    store::{JsonCache, Store, read_json, write_json},
 };
 use anyhow::{Context, Result, ensure};
 use base64::Engine;
@@ -171,41 +171,94 @@ pub fn install(release: &Release) -> Result<()> {
     Ok(())
 }
 
-pub fn automatic(store: &Store) -> Result<bool> {
-    let settings = store.settings()?;
-    if !settings.updates.automatic {
-        return Ok(false);
-    }
-    let path = store.root.join("updates.json");
-    let mut state: UpdateState = if path.exists() {
-        read_json(&path)?
-    } else {
-        UpdateState::default()
-    };
-    let now = Local::now();
-    if now.time() < parse_time(&settings.updates.time)?
-        || state
-            .last_attempt
-            .is_some_and(|t| t.with_timezone(&Local).date_naive() >= now.date_naive())
-    {
-        return Ok(false);
-    }
-    let _lock = store.lock("update")?;
-    state.last_attempt = Some(Utc::now());
-    write_json(&path, &state)?;
-    let result = (|| {
-        if let Some(release) = check()? {
-            install(&release)?;
-            state.installed_version = Some(release.version);
-            Ok(true)
-        } else {
-            Ok(false)
+#[derive(Default)]
+pub(crate) struct Automatic {
+    settings: JsonCache<crate::model::Settings>,
+    state: JsonCache<UpdateState>,
+}
+impl Automatic {
+    pub(crate) fn run(&mut self, store: &Store) -> Result<bool> {
+        let settings = self
+            .settings
+            .get(&store.root.join("config.json"), || store.settings())?;
+        if !settings.updates.automatic {
+            return Ok(false);
         }
-    })();
-    state.last_error = result
-        .as_ref()
-        .err()
-        .map(|e: &anyhow::Error| format!("{e:#}"));
-    write_json(&path, &state)?;
-    result
+        let path = store.root.join("updates.json");
+        let state = self.state.get(&path, || {
+            if path.exists() {
+                read_json(&path)
+            } else {
+                Ok(UpdateState::default())
+            }
+        })?;
+        let now = Local::now();
+        if now.time() < parse_time(&settings.updates.time)?
+            || state
+                .last_attempt
+                .is_some_and(|t| t.with_timezone(&Local).date_naive() >= now.date_naive())
+        {
+            return Ok(false);
+        }
+        let _lock = store.lock("update")?;
+        // Re-read on the rare write path; another updater may have changed the record.
+        let mut state: UpdateState = if path.exists() {
+            read_json(&path)?
+        } else {
+            UpdateState::default()
+        };
+        state.last_attempt = Some(Utc::now());
+        write_json(&path, &state)?;
+        let result = (|| {
+            if let Some(release) = check()? {
+                install(&release)?;
+                state.installed_version = Some(release.version);
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        })();
+        state.last_error = result
+            .as_ref()
+            .err()
+            .map(|e: &anyhow::Error| format!("{e:#}"));
+        write_json(&path, &state)?;
+        result
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{model::Settings, store::metrics};
+
+    #[test]
+    fn automatic_cache_observes_settings_and_update_state_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().canonicalize().unwrap().join("data")).unwrap();
+        let mut settings = Settings::default();
+        settings.updates.automatic = true;
+        write_json(&store.root.join("config.json"), &settings).unwrap();
+        let state_path = store.root.join("updates.json");
+        write_json(
+            &state_path,
+            &UpdateState {
+                last_attempt: Some(Utc::now()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut updater = Automatic::default();
+        assert!(!updater.run(&store).unwrap());
+        metrics::take();
+        assert!(!updater.run(&store).unwrap());
+        assert!(metrics::take().reads.is_empty());
+        std::fs::write(&state_path, b"broken").unwrap();
+        assert!(updater.run(&store).is_err());
+        settings.updates.automatic = false;
+        write_json(&store.root.join("config.json"), &settings).unwrap();
+        assert!(!updater.run(&store).unwrap());
+        std::fs::write(store.root.join("config.json"), b"broken").unwrap();
+        assert!(updater.run(&store).is_err());
+    }
 }

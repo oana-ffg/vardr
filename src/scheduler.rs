@@ -2,13 +2,13 @@ use crate::{
     model::*,
     process::STOP,
     runner::{self, Workers},
-    store::{self, Store, write_json},
+    store::{self, JobCache, JsonCache, Store, write_json},
     updates,
 };
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::atomic::Ordering,
     thread,
     time::{Duration, Instant},
@@ -63,6 +63,8 @@ fn serve_loop(store: &Store, once: bool) -> Result<bool> {
 fn serve_loop_with_wait(store: &Store, once: bool, mut wait: impl FnMut() -> bool) -> Result<bool> {
     let mut errors = recover_interrupted(store)?;
     let mut workers = Workers::default();
+    let mut schedule = ScheduleCache::default();
+    let mut updater = updates::Automatic::default();
     let mut last_heartbeat = Instant::now() - Duration::from_secs(31);
     let mut last_reported = None;
     loop {
@@ -82,7 +84,7 @@ fn serve_loop_with_wait(store: &Store, once: bool, mut wait: impl FnMut() -> boo
         }
         if !stopped {
             errors.retain(|key, _| !key.starts_with("job:"));
-            match dispatch_due(store, &mut workers) {
+            match dispatch_due(store, &mut workers, &mut schedule) {
                 Ok(job_errors) => {
                     errors.remove("scheduler");
                     errors.extend(job_errors);
@@ -92,7 +94,7 @@ fn serve_loop_with_wait(store: &Store, once: bool, mut wait: impl FnMut() -> boo
                 }
             }
             if workers.tasks.is_empty() && !once {
-                match updates::automatic(store) {
+                match updater.run(store) {
                     Ok(true) => {
                         report(store, &[], &errors, 0)?;
                         return Ok(true);
@@ -156,22 +158,43 @@ pub(crate) fn due_by(
     let watermark = state.watermark.map_or(baseline, |w| w.max(baseline));
     job.schedule.due(watermark, until)
 }
-fn dispatch_due(store: &Store, workers: &mut Workers) -> Result<BTreeMap<String, String>> {
-    let settings = store.settings()?;
+#[derive(Default)]
+struct ScheduleCache {
+    jobs: JobCache,
+    settings: JsonCache<Settings>,
+    states: BTreeMap<String, JsonCache<RuntimeState>>,
+}
+fn dispatch_due(
+    store: &Store,
+    workers: &mut Workers,
+    cache: &mut ScheduleCache,
+) -> Result<BTreeMap<String, String>> {
+    let settings = cache
+        .settings
+        .get(&store.root.join("config.json"), || store.settings())?;
     let now = Utc::now();
-    let inventory = store.jobs()?;
+    let inventory = cache.jobs.jobs(store)?;
+    let ids: BTreeSet<_> = inventory.jobs.iter().map(|j| &j.id).collect();
+    cache.states.retain(|id, _| ids.contains(id));
     let mut errors: BTreeMap<_, _> = inventory
         .errors
         .into_iter()
         .map(|(id, e)| (format!("job:{id}"), e))
         .collect();
     let mut candidates = Vec::new();
-    for job in inventory
-        .jobs
-        .into_iter()
-        .filter(|j| j.enabled && !workers.tasks.contains_key(&j.id))
-    {
+    for job in inventory.jobs.into_iter().filter(|j| {
+        j.enabled && j.schedule != Schedule::Manual && !workers.tasks.contains_key(&j.id)
+    }) {
         let result = (|| -> Result<Option<chrono::DateTime<Utc>>> {
+            let state = cache.states.entry(job.id.clone()).or_default().get(
+                &store.root.join("state").join(format!("{}.json", job.id)),
+                || store.state(&job.id),
+            )?;
+            if due_by(&job, state, now, now)?.is_none() {
+                return Ok(None);
+            }
+            // Only due jobs need a transaction. Always re-read under the lock:
+            // another runner may have changed the cursor since the cached read.
             let _state_lock = store.transaction(&format!("state-{}", job.id))?;
             if !store.has_job(&job.id)? {
                 return Ok(None);
@@ -322,6 +345,8 @@ mod tests {
                     measured_start.elapsed().as_secs_f64(), reads("jobs"), reads("state"),
                     file_reads("config.json"), file_reads("updates.json"), counts.locks, counts.writes, counts.syncs
                 );
+                assert!(counts.reads.is_empty(), "unchanged JSON must stay cached");
+                assert_eq!(counts.locks, 0, "non-due jobs need no locks");
                 assert_eq!(counts.writes, 0);
                 assert_eq!(counts.syncs, 0);
                 return false;
@@ -330,5 +355,73 @@ mod tests {
             true
         })
         .unwrap();
+    }
+
+    #[test]
+    fn cached_scheduler_observes_edits_state_errors_and_removals() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().canonicalize().unwrap().join("data")).unwrap();
+        let mut cache = ScheduleCache::default();
+        let mut workers = Workers::default();
+        let job: Job = serde_json::from_value(serde_json::json!({
+            "id":"edited", "name":"Edit", "purpose":"Exercise cached dispatch",
+            "cwd":store.root, "target":{"type":"command","argv":["/bin/echo","cached"]},
+            "schedule":{"type":"interval","seconds":3600}
+        }))
+        .unwrap();
+        let mut job = store.save(job).unwrap();
+        let scan = |workers: &mut Workers, cache: &mut ScheduleCache| {
+            dispatch_due(&store, workers, cache).unwrap()
+        };
+        assert!(scan(&mut workers, &mut cache).is_empty());
+        assert!(workers.tasks.is_empty());
+        let path = store.root.join("jobs/edited.json");
+        std::fs::write(&path, b"bad JSON").unwrap();
+        assert!(scan(&mut workers, &mut cache).contains_key("job:edited.json"));
+        assert!(workers.tasks.is_empty());
+        // Repair with a due schedule, without restarting the scheduler.
+        job.schedule = Schedule::Interval { seconds: 10 };
+        job.updated_at = Some(Utc::now() - chrono::Duration::seconds(20));
+        write_json(&path, &job).unwrap();
+        // An externally advanced cursor must suppress that occurrence.
+        store
+            .save_state(
+                &job.id,
+                &RuntimeState {
+                    watermark: Some(Utc::now()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(scan(&mut workers, &mut cache).is_empty());
+        assert!(workers.tasks.is_empty());
+        // A broken state must surface instead of falling back to a cached cursor.
+        let state = store.root.join("state/edited.json");
+        std::fs::write(&state, b"bad JSON").unwrap();
+        assert!(scan(&mut workers, &mut cache).contains_key("job:edited"));
+        // Removing the state restores the default and dispatches the due job.
+        std::fs::remove_file(&state).unwrap();
+        assert!(scan(&mut workers, &mut cache).is_empty());
+        let results = workers.finish();
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results
+                .into_iter()
+                .next()
+                .unwrap()
+                .1
+                .unwrap()
+                .unwrap()
+                .status,
+            "succeeded"
+        );
+        assert!(scan(&mut workers, &mut cache).is_empty());
+        assert!(
+            workers.tasks.is_empty(),
+            "the reservation must invalidate the cached cursor"
+        );
+        store.remove(&job.id, None).unwrap();
+        assert!(scan(&mut workers, &mut cache).is_empty());
+        assert!(cache.states.is_empty());
     }
 }

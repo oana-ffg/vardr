@@ -130,21 +130,16 @@ impl Store {
         Ok(s)
     }
     pub fn jobs(&self) -> Result<JobInventory> {
+        self.jobs_with(read_job)
+    }
+    fn jobs_with(&self, mut read: impl FnMut(&Path) -> Result<Job>) -> Result<JobInventory> {
         let mut inventory = JobInventory::default();
         for entry in fs::read_dir(self.root.join("jobs"))? {
             let p = entry?.path();
             if p.extension().is_none_or(|x| x != "json") {
                 continue;
             }
-            let result = (|| -> Result<Job> {
-                let job: Job = read_json(&p)?;
-                job.validate()?;
-                ensure!(
-                    p.file_stem().unwrap() == job.id.as_str(),
-                    "job ID does not match filename"
-                );
-                Ok(job)
-            })();
+            let result = read(&p);
             match result {
                 Ok(job) => inventory.jobs.push(job),
                 Err(e) => {
@@ -345,7 +340,13 @@ impl Store {
         for run in self
             .runs(id)?
             .into_iter()
-            .filter(|r| r.finished_at.is_some())
+            .filter(|r| {
+                r.finished_at.is_some()
+                    && !r
+                        .investigation
+                        .as_ref()
+                        .is_some_and(|i| i.status == "running")
+            })
             .skip(keep)
         {
             let dir = self.run_dir(id, &run.id)?;
@@ -408,6 +409,87 @@ impl Store {
             Err(e) => Err(e.into()),
         }
     }
+}
+
+/// Cache only unchanged files, including absence for default settings/state. Atomic
+/// replacements and in-place edits both invalidate it. Errors never return stale data.
+pub(crate) struct JsonCache<T> {
+    value: Option<(Option<FileStamp>, T)>,
+}
+impl<T> Default for JsonCache<T> {
+    fn default() -> Self {
+        Self { value: None }
+    }
+}
+#[derive(PartialEq, Eq)]
+struct FileStamp {
+    dev: u64,
+    ino: u64,
+    len: u64,
+    mode: u32,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+fn file_stamp(path: &Path) -> Result<Option<FileStamp>> {
+    use std::os::unix::fs::MetadataExt;
+    reject_symlinks(path)?;
+    let m = match fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("cannot stat {}", path.display())),
+    };
+    Ok(Some(FileStamp {
+        dev: m.dev(),
+        ino: m.ino(),
+        len: m.len(),
+        mode: m.mode(),
+        modified: (m.mtime(), m.mtime_nsec()),
+        changed: (m.ctime(), m.ctime_nsec()),
+    }))
+}
+impl<T> JsonCache<T> {
+    pub(crate) fn get(&mut self, path: &Path, load: impl FnOnce() -> Result<T>) -> Result<&T> {
+        let stamp = file_stamp(path)?;
+        if self
+            .value
+            .as_ref()
+            .is_none_or(|(previous, _)| *previous != stamp)
+        {
+            self.value = None;
+            self.value = Some((stamp, load()?));
+        }
+        Ok(&self.value.as_ref().unwrap().1)
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct JobCache {
+    files: std::collections::BTreeMap<PathBuf, JsonCache<Job>>,
+}
+impl JobCache {
+    pub(crate) fn jobs(&mut self, store: &Store) -> Result<JobInventory> {
+        let mut seen = std::collections::BTreeSet::new();
+        let result = store.jobs_with(|path| {
+            seen.insert(path.to_owned());
+            self.files
+                .entry(path.to_owned())
+                .or_default()
+                .get(path, || read_job(path))
+                .cloned()
+        });
+        // Evict removals even when another definition is invalid.
+        self.files.retain(|path, _| seen.contains(path));
+        result
+    }
+}
+fn read_job(path: &Path) -> Result<Job> {
+    let job: Job = read_json(path)?;
+    job.validate()?;
+    ensure!(
+        path.file_stem().unwrap() == job.id.as_str(),
+        "job ID does not match filename"
+    );
+    Ok(job)
 }
 
 /// What `Store::remove` keeps of a job: enough to never reuse its revisions.
@@ -497,5 +579,78 @@ pub(crate) mod metrics {
     }
     pub fn take() -> Counts {
         COUNTS.with(|m| std::mem::take(&mut *m.borrow_mut()))
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    use std::os::unix::fs::{MetadataExt, symlink};
+
+    #[test]
+    fn json_cache_observes_defaults_replacements_in_place_edits_errors_and_symlinks() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let path = root.join("config.json");
+        let mut cache = JsonCache::default();
+        let load = || {
+            if path.exists() {
+                read_json::<Settings>(&path)
+            } else {
+                Ok(Settings::default())
+            }
+        };
+        assert_eq!(cache.get(&path, load).unwrap().max_concurrency, 1);
+        let mut settings = Settings {
+            max_concurrency: 2,
+            ..Default::default()
+        };
+        write_json(&path, &settings).unwrap();
+        assert_eq!(cache.get(&path, load).unwrap().max_concurrency, 2);
+        metrics::take();
+        assert_eq!(cache.get(&path, load).unwrap().max_concurrency, 2);
+        assert!(metrics::take().reads.is_empty());
+        // Same inode, same length, and restored mtime: ctime must invalidate it.
+        let before = fs::metadata(&path).unwrap();
+        let data = fs::read_to_string(&path)
+            .unwrap()
+            .replace("\"max_concurrency\": 2", "\"max_concurrency\": 3");
+        fs::write(&path, data).unwrap();
+        File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(before.modified().unwrap())
+            .unwrap();
+        assert_eq!(fs::metadata(&path).unwrap().ino(), before.ino());
+        assert_eq!(cache.get(&path, load).unwrap().max_concurrency, 3);
+        settings.max_concurrency = 4;
+        write_json(&path, &settings).unwrap();
+        assert_eq!(cache.get(&path, load).unwrap().max_concurrency, 4);
+        fs::write(&path, b"broken").unwrap();
+        assert!(cache.get(&path, load).is_err());
+        write_json(&path, &settings).unwrap();
+        assert_eq!(cache.get(&path, load).unwrap().max_concurrency, 4);
+        fs::remove_file(&path).unwrap();
+        assert_eq!(cache.get(&path, load).unwrap().max_concurrency, 1);
+        let other = root.join("other.json");
+        write_json(&other, &settings).unwrap();
+        symlink(&other, &path).unwrap();
+        assert!(cache.get(&path, load).is_err());
+    }
+
+    #[test]
+    fn removed_jobs_are_evicted_from_the_inventory_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().canonicalize().unwrap().join("data")).unwrap();
+        let mut cache = JobCache::default();
+        // Invalid files must be reported, then evicted after deletion too.
+        let path = store.root.join("jobs/broken.json");
+        fs::write(&path, b"broken").unwrap();
+        assert_eq!(cache.jobs(&store).unwrap().errors.len(), 1);
+        assert_eq!(cache.files.len(), 1);
+        fs::remove_file(path).unwrap();
+        assert!(cache.jobs(&store).unwrap().errors.is_empty());
+        assert!(cache.files.is_empty());
     }
 }
