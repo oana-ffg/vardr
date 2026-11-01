@@ -14,7 +14,7 @@ pub struct Report {
     pub warning: Option<String>,
 }
 impl Report {
-    /// Old reports remain available to migration as historical failure evidence.
+    /// Usable diagnostics include a completed scheduler's final report.
     pub fn current(&self) -> Option<&ServiceState> {
         self.state.as_ref().filter(|_| self.warning.is_none())
     }
@@ -50,13 +50,16 @@ pub fn read(store: &Store) -> Result<Report> {
         }
         Err(error) => return Err(error),
     };
-    let fresh = (state.pid == 0 || running)
-        && state.updated_at.is_some_and(|updated| {
-            let age = Utc::now().signed_duration_since(updated).num_seconds();
-            // Three missed heartbeats, with one interval of clock skew allowed.
-            let interval = INTERVAL.as_secs() as i64;
-            (-interval..=3 * interval).contains(&age)
-        });
+    // PID zero is a completed report, not a liveness claim. Retain it through
+    // a restart until the new scheduler replaces it with its own report.
+    let fresh = state.pid == 0
+        || (running
+            && state.updated_at.is_some_and(|updated| {
+                let age = Utc::now().signed_duration_since(updated).num_seconds();
+                // Three missed heartbeats, with one interval of clock skew allowed.
+                let interval = INTERVAL.as_secs() as i64;
+                (-interval..=3 * interval).contains(&age)
+            }));
     Ok(Report {
         state: Some(state),
         running,

@@ -620,3 +620,74 @@ fn status_and_dashboard_tolerate_missing_torn_and_stale_service_reports() {
         }
     }
 }
+
+#[test]
+fn status_and_dashboard_distinguish_final_reports_from_live_heartbeats() {
+    use chrono::{Duration, Utc};
+    use vardr::{store::Store, ui};
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().canonicalize().unwrap().join("data");
+    let store = Store::open(home.clone()).unwrap();
+    let now = Utc::now();
+    let old = now - Duration::days(1);
+    let future = now + Duration::days(1);
+    let pid = std::process::id();
+    let cases = [
+        ("crashed", pid, false, Some(now), true),
+        ("live and recent", pid, true, Some(now), false),
+        ("live but old", pid, true, Some(old), true),
+        ("completed and old", 0, false, Some(old), false),
+        ("restarted before first report", 0, true, Some(old), false),
+        ("completed without timestamp", 0, false, None, false),
+        ("restarted without timestamp", 0, true, None, false),
+        ("live without timestamp", pid, true, None, true),
+        ("live with future timestamp", pid, true, Some(future), true),
+        (
+            "completed with future timestamp",
+            0,
+            false,
+            Some(future),
+            false,
+        ),
+    ];
+    let errors = json!({"previous-job":"Previous execution failed"});
+    for (case, pid, locked, updated_at, stale) in cases {
+        let final_or_heartbeat = json!({
+            "updated_at":updated_at, "pid":pid,
+            "running":[], "errors":errors
+        });
+        std::fs::write(home.join("service.json"), final_or_heartbeat.to_string()).unwrap();
+        let _owner = locked.then(|| store.lock("service").unwrap());
+        let output = Command::new(bin())
+            .arg("--home")
+            .arg(&home)
+            .arg("status")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{case}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let status: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let snapshot = ui::snapshot(&store).unwrap();
+        assert_eq!(status["service_running"], locked, "{case}");
+        assert_eq!(snapshot["service_running"], locked, "{case}");
+        assert_eq!(status["service_warning"].is_string(), stale, "{case}");
+        assert_eq!(snapshot["errors"].get("service").is_some(), stale, "{case}");
+        if stale {
+            assert!(status["service"].is_null(), "{case}");
+            assert!(snapshot["service"].is_null(), "{case}");
+        } else {
+            assert_eq!(status["service"], final_or_heartbeat, "{case}");
+            assert_eq!(snapshot["service"], final_or_heartbeat, "{case}");
+            assert_eq!(status["service"]["errors"], errors, "{case}");
+            assert_eq!(snapshot["service"]["errors"], errors, "{case}");
+            assert_eq!(
+                snapshot["errors"],
+                json!({}),
+                "{case}: no synthetic service error"
+            );
+        }
+    }
+}
