@@ -55,6 +55,12 @@ fn report(
     )
 }
 fn serve_loop(store: &Store, once: bool) -> Result<bool> {
+    serve_loop_with_wait(store, once, || {
+        thread::sleep(Duration::from_secs(2));
+        true
+    })
+}
+fn serve_loop_with_wait(store: &Store, once: bool, mut wait: impl FnMut() -> bool) -> Result<bool> {
     let mut errors = recover_interrupted(store)?;
     let mut workers = Workers::default();
     let mut last_heartbeat = Instant::now() - Duration::from_secs(31);
@@ -132,7 +138,9 @@ fn serve_loop(store: &Store, once: bool) -> Result<bool> {
             );
             return Ok(false);
         }
-        thread::sleep(Duration::from_secs(2));
+        if !wait() {
+            break;
+        }
     }
     report(store, &[], &errors, 0)?;
     Ok(false)
@@ -259,4 +267,68 @@ fn recover_interrupted(store: &Store) -> Result<BTreeMap<String, String>> {
         }
     }
     Ok(errors)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::metrics;
+
+    #[test]
+    fn idle_scheduler_io_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().canonicalize().unwrap().join("data")).unwrap();
+        let mut settings = Settings::default();
+        settings.updates.automatic = true;
+        write_json(&store.root.join("config.json"), &settings).unwrap();
+        write_json(
+            &store.root.join("updates.json"),
+            &updates::UpdateState {
+                last_attempt: Some(Utc::now()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        for n in 0..100 {
+            let job: Job = serde_json::from_value(serde_json::json!({
+                "id":format!("idle-{n}"), "name":"Idle", "purpose":"Measure idle scheduler IO",
+                "cwd":store.root, "target":{"type":"command","argv":["/bin/true"]},
+                "schedule":{"type":"interval","seconds":3600}
+            }))
+            .unwrap();
+            let job = store.save(job).unwrap();
+            store.save_state(&job.id, &RuntimeState::default()).unwrap();
+        }
+        let mut waits = 0;
+        let mut measured_start = Instant::now();
+        serve_loop_with_wait(&store, false, || {
+            waits += 1;
+            if waits == 1 {
+                metrics::take();
+                measured_start = Instant::now();
+            }
+            if waits == 4 {
+                let counts = metrics::take();
+                let reads = |part: &str| {
+                    counts.reads.iter()
+                        .filter(|(p, _)| p.parent().unwrap().ends_with(part))
+                        .map(|(_, n)| n).sum::<usize>()
+                };
+                let file_reads = |name: &str| {
+                    counts.reads.get(&store.root.join(name)).copied().unwrap_or(0)
+                };
+                eprintln!(
+                    "Idle window ({:.3}s): job_reads={}, state_reads={}, config_reads={}, update_reads={}, locks={}, JSON_replacements={}, sync_all_calls={}, timer_waits=3",
+                    measured_start.elapsed().as_secs_f64(), reads("jobs"), reads("state"),
+                    file_reads("config.json"), file_reads("updates.json"), counts.locks, counts.writes, counts.syncs
+                );
+                assert_eq!(counts.writes, 0);
+                assert_eq!(counts.syncs, 0);
+                return false;
+            }
+            thread::sleep(Duration::from_secs(2));
+            true
+        })
+        .unwrap();
+    }
 }

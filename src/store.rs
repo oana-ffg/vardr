@@ -355,6 +355,8 @@ impl Store {
         Ok(())
     }
     fn lock_file(&self, name: &str) -> Result<File> {
+        #[cfg(test)]
+        metrics::update(|m| m.locks += 1);
         validate_id(name)?;
         let p = self.root.join("locks").join(format!("{name}.lock"));
         reject_symlinks(&p)?;
@@ -416,6 +418,8 @@ struct Removed {
 
 fn sync_parent(path: &Path) -> Result<()> {
     File::open(path.parent().context("missing parent directory")?)?.sync_all()?;
+    #[cfg(test)]
+    metrics::update(|m| m.syncs += 1);
     Ok(())
 }
 
@@ -446,6 +450,8 @@ pub fn reject_symlinks(path: &Path) -> Result<()> {
     Ok(())
 }
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
+    #[cfg(test)]
+    metrics::update(|m| *m.reads.entry(path.to_owned()).or_default() += 1);
     reject_symlinks(path)?;
     let mut data = Vec::new();
     File::open(path)
@@ -464,8 +470,32 @@ pub fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
     serde_json::to_writer_pretty(&mut tmp, value)?;
     tmp.write_all(b"\n")?;
     tmp.as_file().sync_all()?;
+    #[cfg(test)]
+    metrics::update(|m| {
+        m.writes += 1;
+        m.syncs += 1;
+    });
     tmp.persist(path)
         .map_err(|e| e.error)
         .with_context(|| format!("cannot write {}", path.display()))?;
     sync_parent(path)
+}
+
+#[cfg(test)]
+pub(crate) mod metrics {
+    use std::{cell::RefCell, collections::BTreeMap, path::PathBuf};
+    #[derive(Debug, Default)]
+    pub struct Counts {
+        pub reads: BTreeMap<PathBuf, usize>,
+        pub locks: usize,
+        pub writes: usize,
+        pub syncs: usize,
+    }
+    thread_local! { static COUNTS: RefCell<Counts> = RefCell::default(); }
+    pub fn update(f: impl FnOnce(&mut Counts)) {
+        COUNTS.with(|m| f(&mut m.borrow_mut()));
+    }
+    pub fn take() -> Counts {
+        COUNTS.with(|m| std::mem::take(&mut *m.borrow_mut()))
+    }
 }
