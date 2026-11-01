@@ -368,13 +368,9 @@ fn entry(cli: Cli) -> Result<()> {
             output(&json!({"available":release,"installed":install && release.is_some()}))?;
         }
         Commands::Status => {
-            let heartbeat = store.root.join("service.json");
-            let state: Option<serde_json::Value> = if heartbeat.exists() {
-                Some(read_json(&heartbeat)?)
-            } else {
-                None
-            };
-            let running = store.is_locked("service")?;
+            let report = vardr::heartbeat::read(&store)?;
+            let state = report.current();
+            let running = report.running;
             let updater = store.root.join("updates.json");
             let updates: Option<serde_json::Value> = if updater.exists() {
                 Some(read_json(&updater)?)
@@ -382,7 +378,7 @@ fn entry(cli: Cli) -> Result<()> {
                 None
             };
             output(
-                &json!({"home":store.root,"service_running":running,"service":state,"updates":updates,"settings":store.settings()?}),
+                &json!({"home":store.root,"service_running":running,"service":state,"service_warning":report.warning,"updates":updates,"settings":store.settings()?}),
             )?;
         }
         Commands::Discover { host } => {

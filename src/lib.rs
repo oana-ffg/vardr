@@ -1,6 +1,7 @@
 pub mod agents;
 pub mod bridge;
 pub mod discovery;
+pub mod heartbeat;
 pub mod hosts;
 #[cfg(target_os = "macos")]
 pub mod macos_signing;

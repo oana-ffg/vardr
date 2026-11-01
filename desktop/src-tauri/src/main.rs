@@ -1,6 +1,7 @@
 mod desktop_updates;
 #[cfg(target_os = "macos")]
 mod macos_update;
+mod update_timer;
 
 use anyhow::{Context, Result};
 use std::{
@@ -35,6 +36,7 @@ struct Desktop {
     server: Mutex<Option<JoinHandle<()>>>,
     updating: AtomicBool,
     lifecycle: Mutex<Lifecycle>,
+    update_stop: Mutex<Option<std::sync::mpsc::Sender<()>>>,
 }
 
 /// Set while a migration runs; quitting then could stop it between steps.
@@ -317,12 +319,14 @@ fn main() {
                         .show(|_| {});
                 }
             });
+            let (update_stop, update_shutdown) = std::sync::mpsc::channel();
             app.manage(Desktop {
                 store,
                 activity,
                 server: Mutex::new(Some(server)),
                 updating: AtomicBool::new(false),
                 lifecycle: Mutex::new(Lifecycle::Ready),
+                update_stop: Mutex::new(Some(update_stop)),
             });
             menus(app.handle())?;
             // Local HTTP remains authenticated; the page receives no Tauri IPC capabilities.
@@ -345,15 +349,13 @@ fn main() {
                 .navigate(url)?;
             let handle = app.handle().clone();
             std::thread::spawn(move || {
-                while !process::STOP.load(Ordering::Relaxed) {
-                    desktop_updates::check(handle.clone(), false);
-                    for _ in 0..60 {
-                        if process::STOP.load(Ordering::Relaxed) {
-                            return;
-                        }
-                        std::thread::sleep(std::time::Duration::from_secs(1));
+                update_timer::run(update_shutdown, || {
+                    if process::STOP.load(Ordering::Relaxed) {
+                        return false;
                     }
-                }
+                    desktop_updates::check(handle.clone(), false);
+                    true
+                });
             });
             Ok(())
         })
@@ -391,6 +393,9 @@ fn main() {
         }
         RunEvent::Exit => {
             process::STOP.store(true, Ordering::Relaxed);
+            if let Some(desktop) = app.try_state::<Desktop>() {
+                drop(desktop.update_stop.lock().unwrap().take());
+            }
             if let Some(server) = app.try_state::<Desktop>().and_then(|desktop| desktop.server.lock().unwrap().take()) { let _ = server.join(); }
         }
         _ => {}

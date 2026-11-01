@@ -4,7 +4,6 @@
 //! A record is written before data moves and removed once the new scheduler runs, so a
 //! failed or interrupted migration is finished by running `vardr migrate` again.
 use crate::{
-    model::ServiceState,
     service::{self, LABEL, LEGACY_LABEL, Receipt},
     store::{Home, Lock, MIGRATION_RECORD, Store, read_json, resolve_home, write_json},
 };
@@ -239,21 +238,21 @@ fn launch_path(plist: &Path) -> Result<String> {
 fn idle(store: &Store) -> Result<()> {
     let now = Utc::now();
     let until = now + chrono::Duration::from_std(STOP_WINDOW)?;
-    let service = store.root.join("service.json");
-    if store.is_locked("service")? && service.exists() {
-        let state: ServiceState = read_json(&service)?;
-        ensure!(
-            state.running.is_empty(),
-            "{} is running; migrate once it finishes",
-            state.running.join(", ")
-        );
+    // Include runs whose definitions no longer parse. A report may be stale or
+    // torn, so only actual held run locks establish that work is executing.
+    for entry in fs::read_dir(store.root.join("locks"))? {
+        let path = entry?.path();
+        if path.extension().is_some_and(|ext| ext == "lock")
+            && let Some(name) = path.file_stem().and_then(|name| name.to_str())
+            && let Some(id) = name.strip_prefix("run-")
+        {
+            ensure!(
+                !store.is_locked(name)?,
+                "{id} is running; migrate once it finishes"
+            );
+        }
     }
     for job in store.jobs()?.jobs {
-        ensure!(
-            !store.is_locked(&format!("run-{}", job.id))?,
-            "{} is running; migrate once it finishes",
-            job.id
-        );
         let state = store.state(&job.id)?;
         if job.enabled
             && let Some(due) = crate::scheduler::due_by(&job, &state, now, until)?
@@ -313,11 +312,13 @@ fn quiesce(store: &Store) -> Result<Vec<Lock>> {
 /// id verbatim. Such a key may also name a scheduler-level error, so nothing is inferred
 /// or replayed.
 fn job_failures(store: &Store) -> Result<Vec<Reported>> {
-    let path = store.root.join("service.json");
-    if !path.exists() {
-        return Ok(Vec::new());
+    let report = crate::heartbeat::read(store)?;
+    if let Some(warning) = report.warning {
+        eprintln!("vardr: {warning}");
     }
-    let state: ServiceState = read_json(&path)?;
+    let Some(state) = report.state else {
+        return Ok(Vec::new());
+    };
     let jobs: BTreeSet<String> = store.jobs()?.jobs.into_iter().map(|job| job.id).collect();
     Ok(state
         .errors

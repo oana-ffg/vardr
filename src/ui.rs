@@ -1,5 +1,5 @@
 use crate::{
-    model::{Job, ServiceState},
+    model::Job,
     process::STOP,
     runner::{self, Workers},
     store::{Store, read_json},
@@ -159,12 +159,11 @@ pub fn snapshot(store: &Store) -> Result<Value> {
         };
         jobs.push(json!({"job":job,"latest":latest}));
     }
-    let service_path = store.root.join("service.json");
-    let service: Option<ServiceState> = if service_path.exists() {
-        Some(read_json(&service_path)?)
-    } else {
-        None
-    };
+    let report = crate::heartbeat::read(store)?;
+    let service = report.current();
+    if let Some(warning) = &report.warning {
+        errors.insert("service".into(), warning.clone());
+    }
     let desktop_updates_path = store.root.join("desktop-updates.json");
     let desktop_updates: Option<Value> = if desktop_updates_path.exists() {
         Some(read_json(&desktop_updates_path)?)
@@ -172,7 +171,7 @@ pub fn snapshot(store: &Store) -> Result<Value> {
         None
     };
     Ok(
-        json!({"desktop_updates":desktop_updates,"jobs":jobs,"errors":errors,"service_running":store.is_locked("service")?,"service":service,"version":env!("CARGO_PKG_VERSION")}),
+        json!({"desktop_updates":desktop_updates,"jobs":jobs,"errors":errors,"service_running":report.running,"service":service,"version":env!("CARGO_PKG_VERSION")}),
     )
 }
 fn handle(store: &Store, request: &mut Request, workers: &mut Workers) -> Result<Value> {

@@ -507,7 +507,7 @@ fn rescheduling_a_daily_job_keeps_or_sets_weekdays() {
 }
 
 #[test]
-fn running_scheduler_observes_cli_schedule_edits_after_warming_its_cache() {
+fn running_scheduler_observes_cli_schedule_edits_while_idle() {
     use std::time::{Duration, Instant};
     use vardr::{
         model::Settings,
@@ -579,4 +579,44 @@ fn running_scheduler_observes_cli_schedule_edits_after_warming_its_cache() {
             .unwrap()
             .contains("reloaded")
     );
+}
+
+#[test]
+fn status_and_dashboard_tolerate_missing_torn_and_stale_service_reports() {
+    use vardr::{store::Store, ui};
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().canonicalize().unwrap().join("data");
+    let store = Store::open(home.clone()).unwrap();
+    let path = home.join("service.json");
+    let stale = json!({"updated_at":"2000-01-01T00:00:00Z","pid":999999,"running":["old-run"],"errors":{"old-run":"old failure"}}).to_string();
+    for content in [None, Some(""), Some("{\"pid\":"), Some(stale.as_str())] {
+        if let Some(content) = content {
+            std::fs::write(&path, content).unwrap();
+        }
+        for locked in [false, true] {
+            let _owner = locked.then(|| store.lock("service").unwrap());
+            let output = Command::new(bin())
+                .arg("--home")
+                .arg(&home)
+                .arg("status")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let status: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(status["service_running"], locked);
+            assert!(status["service"].is_null());
+            assert_eq!(status["service_warning"].is_string(), content.is_some());
+            let dashboard = ui::snapshot(&store).unwrap();
+            assert_eq!(dashboard["service_running"], locked);
+            assert!(dashboard["service"].is_null());
+            assert_eq!(
+                dashboard["errors"].get("service").is_some(),
+                content.is_some()
+            );
+        }
+    }
 }

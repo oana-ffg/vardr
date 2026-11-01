@@ -492,3 +492,37 @@ fn resume_after_a_move_is_not_blocked_by_a_job_now_due() {
     assert!(finished.status.success(), "{}", stderr(&finished));
     mac.assert_replaced(&mac.current());
 }
+
+#[test]
+fn migration_tolerates_crash_left_service_reports() {
+    for contents in [
+        "",
+        "{\"pid\":",
+        r#"{"updated_at":"2000-01-01T00:00:00Z","pid":999999,"running":["kept"],"errors":{}}"#,
+    ] {
+        let mac = Mac::new();
+        let legacy = mac.legacy_install(&mac.legacy());
+        fs::write(legacy.root.join("service.json"), contents).unwrap();
+        let migrated = mac.vardr(&["--json", "migrate"]);
+        assert!(migrated.status.success(), "{}", stderr(&migrated));
+        assert!(stderr(&migrated).contains("Scheduler report"));
+        mac.assert_replaced(&mac.current());
+    }
+}
+
+#[test]
+fn migration_checks_run_locks_even_with_a_broken_definition_and_report() {
+    let mac = Mac::new();
+    let legacy = mac.legacy_install(&mac.legacy());
+    let _run = legacy.lock("run-kept").unwrap();
+    fs::write(legacy.root.join("jobs/kept.json"), "broken").unwrap();
+    fs::write(legacy.root.join("service.json"), "").unwrap();
+    let migrated = mac.vardr(&["--json", "migrate"]);
+    assert!(!migrated.status.success());
+    assert!(stderr(&migrated).contains("kept is running"));
+    assert!(
+        mac.launchctl_calls().is_empty(),
+        "must refuse before stopping the old scheduler"
+    );
+    assert!(mac.agent(LEGACY).exists());
+}
