@@ -83,6 +83,7 @@ pub fn run_scheduled(store: &Store, id: &str, revision: u64) -> Result<Option<Ru
         record.error = Some(reason.into());
         record.finished_at = Some(Utc::now());
         store.record(&record)?;
+        store.prune(id, store.settings()?.retained_runs)?;
         return Ok(Some(record));
     }
     let lock = lock?;

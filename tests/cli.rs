@@ -505,3 +505,189 @@ fn rescheduling_a_daily_job_keeps_or_sets_weekdays() {
     assert_eq!(kept["schedule"]["time"], "12:00");
     assert_eq!(kept["schedule"]["weekdays"], json!([]));
 }
+
+#[test]
+fn running_scheduler_observes_cli_schedule_edits_while_idle() {
+    use std::time::{Duration, Instant};
+    use vardr::{
+        model::Settings,
+        store::{Store, write_json},
+    };
+    struct Scheduler(std::process::Child);
+    impl Drop for Scheduler {
+        fn drop(&mut self) {
+            unsafe {
+                libc::kill(self.0.id() as i32, libc::SIGTERM);
+            }
+            self.0.wait().unwrap();
+        }
+    }
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().canonicalize().unwrap().join("data");
+    let store = Store::open(home.clone()).unwrap();
+    let mut settings = Settings::default();
+    settings.updates.automatic = false;
+    write_json(&home.join("config.json"), &settings).unwrap();
+    let fixture = temp.path().join("job.json");
+    std::fs::write(&fixture, serde_json::to_vec(&json!({
+        "id":"schedule-edit", "name":"Schedule edit", "purpose":"Reload CLI edits in a running scheduler",
+        "cwd":temp.path(), "target":{"type":"command","argv":["/bin/echo","reloaded"]},
+        "schedule":{"type":"interval","seconds":3600}
+    })).unwrap()).unwrap();
+    let invoke = |args: &[&str]| {
+        Command::new(bin())
+            .arg("--home")
+            .arg(&home)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    assert!(invoke(&["put", fixture.to_str().unwrap()]).status.success());
+    let _scheduler = Scheduler(
+        Command::new(bin())
+            .arg("--home")
+            .arg(&home)
+            .arg("serve")
+            .spawn()
+            .unwrap(),
+    );
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !home.join("service.json").exists() {
+        assert!(Instant::now() < deadline, "scheduler did not start");
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(store.runs("schedule-edit").unwrap().is_empty());
+    assert!(
+        invoke(&["schedule", "schedule-edit", "--every", "10"])
+            .status
+            .success()
+    );
+    loop {
+        let runs = store.runs("schedule-edit").unwrap();
+        if runs.first().is_some_and(|r| r.status == "succeeded") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "scheduler did not run the edited schedule"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert_eq!(store.runs("schedule-edit").unwrap().len(), 1);
+    assert!(
+        String::from_utf8(invoke(&["logs", "schedule-edit"]).stdout)
+            .unwrap()
+            .contains("reloaded")
+    );
+}
+
+#[test]
+fn status_and_dashboard_tolerate_missing_torn_and_stale_service_reports() {
+    use vardr::{store::Store, ui};
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().canonicalize().unwrap().join("data");
+    let store = Store::open(home.clone()).unwrap();
+    let path = home.join("service.json");
+    let stale = json!({"updated_at":"2000-01-01T00:00:00Z","pid":999999,"running":["old-run"],"errors":{"old-run":"old failure"}}).to_string();
+    for content in [None, Some(""), Some("{\"pid\":"), Some(stale.as_str())] {
+        if let Some(content) = content {
+            std::fs::write(&path, content).unwrap();
+        }
+        for locked in [false, true] {
+            let _owner = locked.then(|| store.lock("service").unwrap());
+            let output = Command::new(bin())
+                .arg("--home")
+                .arg(&home)
+                .arg("status")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            let status: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(status["service_running"], locked);
+            assert!(status["service"].is_null());
+            assert_eq!(status["service_warning"].is_string(), content.is_some());
+            let dashboard = ui::snapshot(&store).unwrap();
+            assert_eq!(dashboard["service_running"], locked);
+            assert!(dashboard["service"].is_null());
+            assert_eq!(
+                dashboard["errors"].get("service").is_some(),
+                content.is_some()
+            );
+        }
+    }
+}
+
+#[test]
+fn status_and_dashboard_distinguish_final_reports_from_live_heartbeats() {
+    use chrono::{Duration, Utc};
+    use vardr::{store::Store, ui};
+    let temp = tempfile::tempdir().unwrap();
+    let home = temp.path().canonicalize().unwrap().join("data");
+    let store = Store::open(home.clone()).unwrap();
+    let now = Utc::now();
+    let old = now - Duration::days(1);
+    let future = now + Duration::days(1);
+    let pid = std::process::id();
+    let cases = [
+        ("crashed", pid, false, Some(now), true),
+        ("live and recent", pid, true, Some(now), false),
+        ("live but old", pid, true, Some(old), true),
+        ("completed and old", 0, false, Some(old), false),
+        ("restarted before first report", 0, true, Some(old), false),
+        ("completed without timestamp", 0, false, None, false),
+        ("restarted without timestamp", 0, true, None, false),
+        ("live without timestamp", pid, true, None, true),
+        ("live with future timestamp", pid, true, Some(future), true),
+        (
+            "completed with future timestamp",
+            0,
+            false,
+            Some(future),
+            false,
+        ),
+    ];
+    let errors = json!({"previous-job":"Previous execution failed"});
+    for (case, pid, locked, updated_at, stale) in cases {
+        let final_or_heartbeat = json!({
+            "updated_at":updated_at, "pid":pid,
+            "running":[], "errors":errors
+        });
+        std::fs::write(home.join("service.json"), final_or_heartbeat.to_string()).unwrap();
+        let _owner = locked.then(|| store.lock("service").unwrap());
+        let output = Command::new(bin())
+            .arg("--home")
+            .arg(&home)
+            .arg("status")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{case}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let status: Value = serde_json::from_slice(&output.stdout).unwrap();
+        let snapshot = ui::snapshot(&store).unwrap();
+        assert_eq!(status["service_running"], locked, "{case}");
+        assert_eq!(snapshot["service_running"], locked, "{case}");
+        assert_eq!(status["service_warning"].is_string(), stale, "{case}");
+        assert_eq!(snapshot["errors"].get("service").is_some(), stale, "{case}");
+        if stale {
+            assert!(status["service"].is_null(), "{case}");
+            assert!(snapshot["service"].is_null(), "{case}");
+        } else {
+            assert_eq!(status["service"], final_or_heartbeat, "{case}");
+            assert_eq!(snapshot["service"], final_or_heartbeat, "{case}");
+            assert_eq!(status["service"]["errors"], errors, "{case}");
+            assert_eq!(snapshot["service"]["errors"], errors, "{case}");
+            assert_eq!(
+                snapshot["errors"],
+                json!({}),
+                "{case}: no synthetic service error"
+            );
+        }
+    }
+}

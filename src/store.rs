@@ -311,6 +311,11 @@ impl Store {
             Ok(RuntimeState::default())
         }
     }
+    /// Advisory liveness does not need to survive a power cut. Keep this
+    /// non-durable path restricted to service.json; all other records stay durable.
+    pub(crate) fn report_service(&self, state: &ServiceState) -> Result<()> {
+        write_json_atomically(&self.root.join("service.json"), state, false)
+    }
     pub fn save_state(&self, id: &str, state: &RuntimeState) -> Result<()> {
         validate_id(id)?;
         write_json(&self.root.join("state").join(format!("{id}.json")), state)
@@ -345,7 +350,13 @@ impl Store {
         for run in self
             .runs(id)?
             .into_iter()
-            .filter(|r| r.finished_at.is_some())
+            .filter(|r| {
+                r.finished_at.is_some()
+                    && !r
+                        .investigation
+                        .as_ref()
+                        .is_some_and(|i| i.status == "running")
+            })
             .skip(keep)
         {
             let dir = self.run_dir(id, &run.id)?;
@@ -355,6 +366,8 @@ impl Store {
         Ok(())
     }
     fn lock_file(&self, name: &str) -> Result<File> {
+        #[cfg(test)]
+        metrics::update(|m| m.locks += 1);
         validate_id(name)?;
         let p = self.root.join("locks").join(format!("{name}.lock"));
         reject_symlinks(&p)?;
@@ -416,6 +429,8 @@ struct Removed {
 
 fn sync_parent(path: &Path) -> Result<()> {
     File::open(path.parent().context("missing parent directory")?)?.sync_all()?;
+    #[cfg(test)]
+    metrics::update(|m| m.syncs += 1);
     Ok(())
 }
 
@@ -446,6 +461,8 @@ pub fn reject_symlinks(path: &Path) -> Result<()> {
     Ok(())
 }
 pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
+    #[cfg(test)]
+    metrics::update(|m| *m.reads.entry(path.to_owned()).or_default() += 1);
     reject_symlinks(path)?;
     let mut data = Vec::new();
     File::open(path)
@@ -457,15 +474,81 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     serde_json::from_slice(&data).with_context(|| format!("invalid JSON in {}", path.display()))
 }
 pub fn write_json(path: &Path, value: &impl Serialize) -> Result<()> {
+    write_json_atomically(path, value, true)
+}
+fn write_json_atomically(path: &Path, value: &impl Serialize, durable: bool) -> Result<()> {
     reject_symlinks(path)?;
     let parent = path.parent().context("missing parent directory")?;
     fs::create_dir_all(parent)?;
     let mut tmp = tempfile::NamedTempFile::new_in(parent)?;
     serde_json::to_writer_pretty(&mut tmp, value)?;
     tmp.write_all(b"\n")?;
-    tmp.as_file().sync_all()?;
+    if durable {
+        tmp.as_file().sync_all()?;
+        #[cfg(test)]
+        metrics::update(|m| m.syncs += 1);
+    }
+    #[cfg(test)]
+    metrics::update(|m| m.writes += 1);
     tmp.persist(path)
         .map_err(|e| e.error)
         .with_context(|| format!("cannot write {}", path.display()))?;
-    sync_parent(path)
+    if durable {
+        sync_parent(path)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) mod metrics {
+    use std::{cell::RefCell, collections::BTreeMap, path::PathBuf};
+    #[derive(Debug, Default)]
+    pub struct Counts {
+        pub reads: BTreeMap<PathBuf, usize>,
+        pub locks: usize,
+        pub writes: usize,
+        pub syncs: usize,
+    }
+    thread_local! { static COUNTS: RefCell<Counts> = RefCell::default(); }
+    pub fn update(f: impl FnOnce(&mut Counts)) {
+        COUNTS.with(|m| f(&mut m.borrow_mut()));
+    }
+    pub fn take() -> Counts {
+        COUNTS.with(|m| std::mem::take(&mut *m.borrow_mut()))
+    }
+}
+
+#[cfg(test)]
+mod durability_tests {
+    use super::*;
+
+    #[test]
+    fn only_service_reports_skip_file_and_directory_syncs() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(temp.path().canonicalize().unwrap().join("data")).unwrap();
+        metrics::take();
+        store.report_service(&ServiceState::default()).unwrap();
+        let counts = metrics::take();
+        assert_eq!(counts.writes, 1);
+        assert_eq!(counts.syncs, 0);
+        read_json::<ServiceState>(&store.root.join("service.json")).unwrap();
+        metrics::take();
+        store.save_state("job", &RuntimeState::default()).unwrap();
+        assert_eq!(metrics::take().syncs, 2);
+        let run: Run = serde_json::from_value(serde_json::json!({
+            "id":"run", "job_id":"job", "job_revision":1,
+            "started_at":Utc::now(), "finished_at":null, "status":"running"
+        }))
+        .unwrap();
+        store.record(&run).unwrap();
+        assert_eq!(metrics::take().syncs, 2);
+        let job: Job = serde_json::from_value(serde_json::json!({
+            "id":"job", "name":"Durable job", "purpose":"Check job durability",
+            "cwd":store.root, "target":{"type":"command","argv":["/bin/true"]},
+            "schedule":{"type":"manual"}
+        }))
+        .unwrap();
+        store.save(job).unwrap();
+        assert_eq!(metrics::take().syncs, 2);
+    }
 }
